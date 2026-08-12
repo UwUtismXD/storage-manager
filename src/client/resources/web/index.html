@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Storage Manager</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #14161b;
+    --panel: #1d2028;
+    --border: #2c303a;
+    --text: #e6e8ee;
+    --muted: #8b91a1;
+    --accent: #5b8cff;
+    --accent-text: #0b0e14;
+    --danger: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; font-size: 13px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+  @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+  }
+  .panel h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  input[type=text], input[type=number] {
+    width: 100%;
+    background: #10131a;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 6px 8px;
+    font-size: 13px;
+  }
+  .row { display: flex; gap: 8px; margin-bottom: 10px; }
+  .row > div { flex: 1; }
+  button {
+    background: var(--accent);
+    color: var(--accent-text);
+    border: none;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  button:hover { filter: brightness(1.1); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; }
+  .status-line { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 13px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+  .dot.paused { background: var(--danger); }
+  .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  .search { margin-bottom: 10px; }
+</style>
+</head>
+<body>
+  <h1>Storage Manager</h1>
+  <p class="sub">Baritone-powered storage bot control panel</p>
+
+  <div class="grid">
+    <div class="panel">
+      <h2>Status</h2>
+      <div class="status-line"><span class="dot" id="statusDot"></span><span id="statusText">loading...</span></div>
+      <div id="queueText" class="sub"></div>
+      <div id="warningText" class="sub" style="color: var(--danger); display: none;"></div>
+      <div class="actions">
+        <button onclick="post('/api/scan')">Rescan storage</button>
+        <button onclick="post('/api/sort')">Sort input chest</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Withdraw item</h2>
+      <div class="row">
+        <div>
+          <label>Item id (e.g. minecraft:diamond)</label>
+          <input type="text" id="withdrawItem" placeholder="minecraft:diamond">
+        </div>
+        <div style="flex: 0 0 100px">
+          <label>Count</label>
+          <input type="number" id="withdrawCount" value="64" min="1">
+        </div>
+      </div>
+      <button onclick="withdraw()">Withdraw to output chest</button>
+    </div>
+
+    <div class="panel">
+      <h2>Inventory</h2>
+      <input class="search" type="text" id="search" placeholder="Filter items..." oninput="renderInventory()">
+      <table>
+        <thead><tr><th>Item</th><th>Count</th></tr></thead>
+        <tbody id="inventoryBody"></tbody>
+      </table>
+    </div>
+
+    <div class="panel">
+      <h2>Setup</h2>
+      <label>Region min (x, y, z)</label>
+      <div class="row">
+        <div><input type="number" id="minX" placeholder="x"></div>
+        <div><input type="number" id="minY" placeholder="y"></div>
+        <div><input type="number" id="minZ" placeholder="z"></div>
+      </div>
+      <label>Region max (x, y, z)</label>
+      <div class="row">
+        <div><input type="number" id="maxX" placeholder="x"></div>
+        <div><input type="number" id="maxY" placeholder="y"></div>
+        <div><input type="number" id="maxZ" placeholder="z"></div>
+      </div>
+      <label>Input chest (x, y, z)</label>
+      <div class="row">
+        <div><input type="number" id="inX" placeholder="x"></div>
+        <div><input type="number" id="inY" placeholder="y"></div>
+        <div><input type="number" id="inZ" placeholder="z"></div>
+      </div>
+      <label>Output chest (x, y, z)</label>
+      <div class="row">
+        <div><input type="number" id="outX" placeholder="x"></div>
+        <div><input type="number" id="outY" placeholder="y"></div>
+        <div><input type="number" id="outZ" placeholder="z"></div>
+      </div>
+      <button class="secondary" onclick="saveSetup()">Save setup</button>
+    </div>
+  </div>
+
+<script>
+let totals = {};
+
+async function post(path, body) {
+  await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  refreshStatus();
+}
+
+async function withdraw() {
+  const item = document.getElementById('withdrawItem').value.trim();
+  const count = parseInt(document.getElementById('withdrawCount').value, 10);
+  if (!item || !count) return;
+  await post('/api/withdraw', { item, count });
+}
+
+function num(id) {
+  const v = document.getElementById(id).value;
+  return v === '' ? 0 : parseInt(v, 10);
+}
+
+async function saveSetup() {
+  await post('/api/setup', {
+    region: {
+      min: { x: num('minX'), y: num('minY'), z: num('minZ') },
+      max: { x: num('maxX'), y: num('maxY'), z: num('maxZ') }
+    },
+    inputChest: { x: num('inX'), y: num('inY'), z: num('inZ') },
+    outputChest: { x: num('outX'), y: num('outY'), z: num('outZ') }
+  });
+}
+
+function renderInventory() {
+  const filter = document.getElementById('search').value.toLowerCase();
+  const body = document.getElementById('inventoryBody');
+  body.innerHTML = '';
+  Object.entries(totals)
+    .filter(([item]) => item.toLowerCase().includes(filter))
+    .sort((a, b) => b[1] - a[1])
+    .forEach(([item, count]) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${item}</td><td>${count}</td>`;
+      body.appendChild(tr);
+    });
+}
+
+async function refreshInventory() {
+  const res = await fetch('/api/inventory');
+  const data = await res.json();
+  totals = data.totals || {};
+  renderInventory();
+}
+
+async function refreshStatus() {
+  const res = await fetch('/api/status');
+  const data = await res.json();
+  document.getElementById('statusText').textContent = data.status;
+  document.getElementById('statusDot').className = 'dot' + (data.paused ? ' paused' : '');
+  document.getElementById('queueText').textContent = data.queueSize + ' job(s) queued: ' + data.queue.join(', ');
+  const warningEl = document.getElementById('warningText');
+  if (data.lastWarning) {
+    warningEl.textContent = 'Last warning: ' + data.lastWarning;
+    warningEl.style.display = 'block';
+  } else {
+    warningEl.style.display = 'none';
+  }
+}
+
+function setVal(id, value) {
+  if (value !== undefined && value !== null) {
+    document.getElementById(id).value = value;
+  }
+}
+
+// Pre-fills the setup form with whatever was last saved, so clicking "Save setup" again
+// (e.g. after only changing the input chest) doesn't blank out the other fields back to 0.
+async function loadSetup() {
+  const res = await fetch('/api/setup');
+  const data = await res.json();
+  if (data.region) {
+    if (data.region.min) { setVal('minX', data.region.min.x); setVal('minY', data.region.min.y); setVal('minZ', data.region.min.z); }
+    if (data.region.max) { setVal('maxX', data.region.max.x); setVal('maxY', data.region.max.y); setVal('maxZ', data.region.max.z); }
+  }
+  if (data.inputChest) { setVal('inX', data.inputChest.x); setVal('inY', data.inputChest.y); setVal('inZ', data.inputChest.z); }
+  if (data.outputChest) { setVal('outX', data.outputChest.x); setVal('outY', data.outputChest.y); setVal('outZ', data.outputChest.z); }
+}
+
+loadSetup();
+refreshInventory();
+refreshStatus();
+setInterval(refreshStatus, 3000);
+setInterval(refreshInventory, 10000);
+</script>
+</body>
+</html>
