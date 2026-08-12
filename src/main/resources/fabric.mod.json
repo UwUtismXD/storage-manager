@@ -1,0 +1,38 @@
+{
+	"schemaVersion": 1,
+	"id": "storage-manager",
+	"version": "${version}",
+	"name": "storage manager",
+	"description": "This is an example description! Tell everyone what your mod is about!",
+	"authors": [
+		"Me!"
+	],
+	"contact": {
+		"homepage": "https://fabricmc.net/",
+		"sources": "https://github.com/FabricMC/fabric-example-mod"
+	},
+	"license": "CC0-1.0",
+	"icon": "assets/storage-manager/icon.png",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"storage.manager.StorageManager"
+		],
+		"client": [
+			"storage.manager.client.StorageManagerClient"
+		]
+	},
+	"mixins": [
+		"storage-manager.mixins.json",
+		{
+			"config": "storage-manager.client.mixins.json",
+			"environment": "client"
+		}
+	],
+	"depends": {
+		"fabricloader": ">=0.19.3",
+		"minecraft": "~26.2",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}
