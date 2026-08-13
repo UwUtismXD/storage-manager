@@ -26,8 +26,11 @@ jobs:
       # under versions/<mc version>/build/libs/.
       - name: build
         run: ./gradlew buildAndCollect
+      # v4, not v7: Gitea runs this workflow too (it reads .github/workflows as well as
+      # .gitea/workflows), and act_runner cannot resolve v7 - it is what failed every
+      # previous run on this repo, always after the Gradle build had already succeeded.
       - name: capture build artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: Artifacts
           path: build/libs/*/*.jar

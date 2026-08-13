@@ -10,8 +10,8 @@ on: [push, pull_request]
 
 jobs:
   build:
-    # act_runner's default label set includes ubuntu-latest; adjust if yours differs.
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 is the label this instance's runner has actually executed jobs with.
+    runs-on: ubuntu-24.04
     steps:
       - name: checkout repository
         uses: actions/checkout@v4
