@@ -42,8 +42,16 @@ jobs:
       - name: build all versions
         run: ./gradlew buildAndCollect --stacktrace
 
+      # The v4 action uploads via ACTIONS_RESULTS_URL, and gitea/runner:nightly
+      # (v3.1.0+6-gdbd9a892) sets that to its own cache server instead of Gitea, so
+      # CreateArtifact hits a port that never answers and the step times out after five
+      # tries. Point it back at the instance by hand; this must match Gitea's ROOT_URL,
+      # which is the same host the origin remote uses. Drop the override once the runner
+      # sets the variable correctly - ACTIONS_RUNTIME_URL is already right.
       - name: capture build artifacts
         uses: actions/upload-artifact@v4
+        env:
+          ACTIONS_RESULTS_URL: http://192.168.8.76:3030/
         with:
           name: jars
           path: build/libs/*/*.jar
