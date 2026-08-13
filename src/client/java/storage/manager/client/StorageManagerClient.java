@@ -7,6 +7,7 @@ import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import storage.manager.client.job.JobExecutor;
 import storage.manager.client.job.JobQueue;
 import storage.manager.client.storage.StorageIndex;
+import storage.manager.client.texture.ItemTextures;
 import storage.manager.client.web.WebServer;
 
 public class StorageManagerClient implements ClientModInitializer {
@@ -18,18 +19,25 @@ public class StorageManagerClient implements ClientModInitializer {
     private StorageIndex index;
     private JobExecutor executor;
     private WebServer webServer;
+    private ItemTextures textures;
 
     @Override
     public void onInitializeClient() {
         index = new StorageIndex();
         index.load();
 
+        textures = new ItemTextures();
+        textures.registerReloadListener();
+
         JobQueue queue = new JobQueue();
         executor = new JobExecutor(queue, index);
-        webServer = new WebServer(queue, index, executor);
+        webServer = new WebServer(queue, index, executor, textures);
         webServer.start(WEB_PORT, false);
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            // Serves texture lookups queued by web requests. Runs even with no player, so the
+            // chest page still renders icons while sitting on the main menu.
+            textures.processPending();
             if (client.player == null) {
                 return;
             }

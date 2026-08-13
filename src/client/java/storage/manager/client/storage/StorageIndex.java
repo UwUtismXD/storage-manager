@@ -68,6 +68,13 @@ public class StorageIndex {
         public int slot;
         public String item;
         public int count;
+        /** e.g. {@code ["sharpness 5", "unbreaking 3"]}. Null (and so omitted from JSON) when none. */
+        public List<String> enchants;
+        /** Set only for renamed stacks. */
+        public String customName;
+        /** Set only for damaged tools, so the UI can draw a durability bar. */
+        public Integer damage;
+        public Integer maxDamage;
 
         public SlotEntry(int slot, String item, int count) {
             this.slot = slot;
@@ -79,6 +86,12 @@ public class StorageIndex {
     public static class ChestEntry {
         public Pos pos;
         public String type;
+        /**
+         * Container slot count, so the UI can draw a double chest as 54 slots rather than
+         * guessing from the highest occupied index. 0 means "not opened yet" - either a chest
+         * discovered by a region scan but never visited, or an entry from an older index file.
+         */
+        public int size;
         public long lastScanned;
         public List<SlotEntry> slots = new ArrayList<>();
     }
@@ -183,10 +196,11 @@ public class StorageIndex {
         return region;
     }
 
-    public synchronized void upsertChest(BlockPos pos, String type, List<SlotEntry> slots, long now) {
+    public synchronized void upsertChest(BlockPos pos, String type, int size, List<SlotEntry> slots, long now) {
         ChestEntry entry = new ChestEntry();
         entry.pos = new Pos(pos);
         entry.type = type;
+        entry.size = size;
         entry.lastScanned = now;
         entry.slots = slots;
         chests.put(entry.pos.key(), entry);
@@ -203,7 +217,7 @@ public class StorageIndex {
     public synchronized void registerEmptyChest(BlockPos pos, String type) {
         String key = new Pos(pos).key();
         if (!chests.containsKey(key)) {
-            upsertChest(pos, type, new ArrayList<>(), 0L);
+            upsertChest(pos, type, 0, new ArrayList<>(), 0L);
         }
     }
 
@@ -226,20 +240,27 @@ public class StorageIndex {
      * Greedily picks whole slots to satisfy a withdrawal request. Each contribution is a full
      * stack (withdrawal moves whole stacks via shift-click, it can't split one) - the last slot
      * may overshoot the requested count rather than under-deliver.
+     *
+     * <p>{@code exclude} keeps the input/output chests out of the search. Without it a withdrawal
+     * could source items straight out of the output chest and then deliver them right back to it.
      */
-    public synchronized List<Contribution> findItem(String itemId, int count) {
+    public synchronized List<Contribution> findItem(String itemId, int count, Collection<BlockPos> exclude) {
         List<Contribution> contributions = new ArrayList<>();
         int remaining = count;
         for (ChestEntry chest : chests.values()) {
             if (remaining <= 0) {
                 break;
             }
+            BlockPos chestPos = chest.pos.toBlockPos();
+            if (exclude.contains(chestPos)) {
+                continue;
+            }
             for (SlotEntry slot : chest.slots) {
                 if (remaining <= 0) {
                     break;
                 }
                 if (itemId.equals(slot.item) && slot.count > 0) {
-                    contributions.add(new Contribution(chest.pos.toBlockPos(), slot.slot, slot.count));
+                    contributions.add(new Contribution(chestPos, slot.slot, slot.count));
                     remaining -= slot.count;
                 }
             }
@@ -252,17 +273,46 @@ public class StorageIndex {
      * randomized within each group so repeated deposits don't all pile onto the same one chest
      * (which also means a full chest naturally gets skipped over on the next attempt instead of
      * being tried forever).
+     *
+     * <p>{@code exclude} keeps the input/output chests out of the results. Without it a sort pass
+     * could deposit straight back into the input chest and then pick the same items up again on
+     * the next pass.
      */
-    public synchronized List<BlockPos> depositCandidates(String itemId) {
+    public synchronized List<BlockPos> depositCandidates(String itemId, Collection<BlockPos> exclude) {
         List<BlockPos> withItem = new ArrayList<>();
         List<BlockPos> others = new ArrayList<>();
         for (ChestEntry chest : chests.values()) {
+            BlockPos chestPos = chest.pos.toBlockPos();
+            if (exclude.contains(chestPos)) {
+                continue;
+            }
             boolean hasItem = chest.slots.stream().anyMatch(s -> itemId.equals(s.item));
-            (hasItem ? withItem : others).add(chest.pos.toBlockPos());
+            (hasItem ? withItem : others).add(chestPos);
         }
         Collections.shuffle(withItem);
         Collections.shuffle(others);
         withItem.addAll(others);
         return withItem;
+    }
+
+    /**
+     * Every known chest in random order, ignoring which items each already holds - the
+     * deliberate opposite of {@link #depositCandidates(String, Collection)}, used by the RANDOMIZE job.
+     *
+     * <p>Callers pass the positions to leave out - the input/output chests, and for a double
+     * chest <em>both</em> of its halves. Matching those up needs to read block states to find
+     * which half is which, so it can't happen here: this class is touched by HTTP handler
+     * threads, and world access is client-tick-thread only.
+     */
+    public synchronized List<BlockPos> randomStorageChests(Collection<BlockPos> exclude) {
+        List<BlockPos> result = new ArrayList<>();
+        for (ChestEntry chest : chests.values()) {
+            BlockPos pos = chest.pos.toBlockPos();
+            if (!exclude.contains(pos)) {
+                result.add(pos);
+            }
+        }
+        Collections.shuffle(result);
+        return result;
     }
 }
