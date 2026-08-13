@@ -26,11 +26,16 @@ jobs:
       # under versions/<mc version>/build/libs/.
       - name: build
         run: ./gradlew buildAndCollect
-      # v4, not v7: Gitea runs this workflow too (it reads .github/workflows as well as
-      # .gitea/workflows), and act_runner cannot resolve v7 - it is what failed every
-      # previous run on this repo, always after the Gradle build had already succeeded.
+      # v3, not v4 or v7:
+      #   * v4+ rejects with GHESNotSupportedError on the GHES instance at
+      #     192.168.8.76:3030 (the artifact backend the v4 client expects is not
+      #     supported by that GHES version).
+      #   * v7 cannot be resolved by Gitea's act_runner, which also reads this file
+      #     alongside .gitea/workflows. v7 was what failed every previous run on this
+      #     repo, always after the Gradle build had already succeeded.
+      # v3 is the lowest common denominator that uploads fine on both backends.
       - name: capture build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: Artifacts
           path: build/libs/*/*.jar

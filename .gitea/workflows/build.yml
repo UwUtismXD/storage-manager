@@ -42,14 +42,15 @@ jobs:
       - name: build all versions
         run: ./gradlew buildAndCollect --stacktrace
 
-      # The v4 action uploads via ACTIONS_RESULTS_URL, and gitea/runner:nightly
-      # (v3.1.0+6-gdbd9a892) sets that to its own cache server instead of Gitea, so
-      # CreateArtifact hits a port that never answers and the step times out after five
-      # tries. Point it back at the instance by hand; this must match Gitea's ROOT_URL,
-      # which is the same host the origin remote uses. Drop the override once the runner
-      # sets the variable correctly - ACTIONS_RUNTIME_URL is already right.
+      # Pinned to v3: the v4 client throws GHESNotSupportedError against the artifact
+      # backend (ACTIONS_RESULTS_URL points at GHES at 192.168.8.76:3030, which doesn't
+      # speak the v2+ @actions/artifact protocol). The env override below is still
+      # required because gitea/runner:nightly (v3.1.0+6-gdbd9a892) sets ACTIONS_RESULTS_URL
+      # to its own cache server instead of Gitea, so CreateArtifact would otherwise hit a
+      # port that never answers. Drop the override once the runner sets the variable
+      # correctly - ACTIONS_RUNTIME_URL is already right.
       - name: capture build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         env:
           ACTIONS_RESULTS_URL: http://192.168.8.76:3030/
         with:
