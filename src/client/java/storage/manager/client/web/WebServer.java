@@ -13,6 +13,7 @@ import storage.manager.client.job.Job;
 import storage.manager.client.job.JobExecutor;
 import storage.manager.client.job.JobQueue;
 import storage.manager.client.storage.StorageIndex;
+import storage.manager.client.texture.ItemTextures;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -20,6 +21,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -32,16 +34,21 @@ import java.util.concurrent.Executors;
  */
 public class WebServer {
 
+    /** How long a texture request waits for the client tick thread before giving up and 404ing. */
+    private static final long TEXTURE_TIMEOUT_MILLIS = 3000L;
+
     private final Gson gson = new Gson();
     private final JobQueue queue;
     private final StorageIndex index;
     private final JobExecutor executor;
+    private final ItemTextures textures;
     private HttpServer server;
 
-    public WebServer(JobQueue queue, StorageIndex index, JobExecutor executor) {
+    public WebServer(JobQueue queue, StorageIndex index, JobExecutor executor, ItemTextures textures) {
         this.queue = queue;
         this.index = index;
         this.executor = executor;
+        this.textures = textures;
     }
 
     public void start(int port, boolean lanAccessible) {
@@ -49,11 +56,15 @@ public class WebServer {
             String host = lanAccessible ? "0.0.0.0" : "127.0.0.1";
             server = HttpServer.create(new InetSocketAddress(host, port), 0);
             server.createContext("/", this::handleIndex);
+            // Longest-prefix wins in HttpServer, so this takes precedence over "/" for /chests.
+            server.createContext("/chests", this::handleChests);
             server.createContext("/api/inventory", this::handleInventory);
             server.createContext("/api/status", this::handleStatus);
             server.createContext("/api/withdraw", this::handleWithdraw);
             server.createContext("/api/scan", this::handleScan);
             server.createContext("/api/sort", this::handleSort);
+            server.createContext("/api/randomize", this::handleRandomize);
+            server.createContext("/api/texture", this::handleTexture);
             server.createContext("/api/setup", this::handleSetup);
             server.setExecutor(Executors.newCachedThreadPool());
             server.start();
@@ -70,11 +81,19 @@ public class WebServer {
     }
 
     private void handleIndex(HttpExchange exchange) throws IOException {
+        serveStatic(exchange, "/web/index.html");
+    }
+
+    private void handleChests(HttpExchange exchange) throws IOException {
+        serveStatic(exchange, "/web/chests.html");
+    }
+
+    private void serveStatic(HttpExchange exchange, String resource) throws IOException {
         if (!"GET".equals(exchange.getRequestMethod())) {
             exchange.sendResponseHeaders(405, -1);
             return;
         }
-        try (InputStream in = WebServer.class.getResourceAsStream("/web/index.html")) {
+        try (InputStream in = WebServer.class.getResourceAsStream(resource)) {
             if (in == null) {
                 exchange.sendResponseHeaders(404, -1);
                 return;
@@ -127,7 +146,18 @@ public class WebServer {
         }
         String item = body.get("item").getAsString();
         int count = body.get("count").getAsInt();
-        queue.enqueue(Job.withdraw(item, count));
+        if (count <= 0) {
+            sendJson(exchange, 400, Map.of("error", "count must be positive"));
+            return;
+        }
+        // The chest view drags a specific slot across, which fetches that exact stack rather than
+        // "any of this item" - the plain form omits both and gets the item-wide search.
+        if (body.has("chest") && body.has("slot")) {
+            BlockPos chest = readPos(body.getAsJsonObject("chest"));
+            queue.enqueue(Job.withdrawSlot(chest, body.get("slot").getAsInt(), item, count));
+        } else {
+            queue.enqueue(Job.withdraw(item, count));
+        }
         sendJson(exchange, 200, Map.of("ok", true));
     }
 
@@ -149,12 +179,63 @@ public class WebServer {
         sendJson(exchange, 200, Map.of("ok", true));
     }
 
+    private void handleRandomize(HttpExchange exchange) throws IOException {
+        if (!"POST".equals(exchange.getRequestMethod())) {
+            exchange.sendResponseHeaders(405, -1);
+            return;
+        }
+        queue.enqueue(Job.randomize());
+        sendJson(exchange, 200, Map.of("ok", true));
+    }
+
+    private void handleTexture(HttpExchange exchange) throws IOException {
+        if (!"GET".equals(exchange.getRequestMethod())) {
+            exchange.sendResponseHeaders(405, -1);
+            return;
+        }
+        String itemId = queryParam(exchange, "item");
+        if (itemId == null || itemId.isBlank()) {
+            exchange.sendResponseHeaders(400, -1);
+            return;
+        }
+        byte[] png = textures.get(itemId, TEXTURE_TIMEOUT_MILLIS);
+        if (png == null) {
+            // No flat texture in this pack (entity-modelled blocks like chests, mostly) - the page
+            // falls back to its labelled swatch when the image fails to load.
+            exchange.sendResponseHeaders(404, -1);
+            return;
+        }
+        exchange.getResponseHeaders().set("Content-Type", "image/png");
+        exchange.getResponseHeaders().set("Cache-Control", "max-age=300");
+        exchange.sendResponseHeaders(200, png.length);
+        try (OutputStream out = exchange.getResponseBody()) {
+            out.write(png);
+        }
+    }
+
+    private static String queryParam(HttpExchange exchange, String name) {
+        String query = exchange.getRequestURI().getRawQuery();
+        if (query == null) {
+            return null;
+        }
+        for (String pair : query.split("&")) {
+            int eq = pair.indexOf('=');
+            if (eq > 0 && name.equals(pair.substring(0, eq))) {
+                return URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8);
+            }
+        }
+        return null;
+    }
+
     private void handleSetup(HttpExchange exchange) throws IOException {
         if ("GET".equals(exchange.getRequestMethod())) {
             Map<String, Object> payload = new LinkedHashMap<>();
             payload.put("region", index.getRegion());
             payload.put("inputChest", index.getInputChestPos());
             payload.put("outputChest", index.getOutputChestPos());
+            // Both halves of each, resolved against the world by the client tick thread - the
+            // index keys a double chest by its LEFT half, which may not be the half the user typed.
+            payload.put("resolved", executor.reservedChestPositions());
             sendJson(exchange, 200, payload);
             return;
         }

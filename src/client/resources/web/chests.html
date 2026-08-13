@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Storage Manager - Chests</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #14161b;
+    --panel: #1d2028;
+    --border: #2c303a;
+    --slot: #10131a;
+    --slot-border: #343945;
+    --text: #e6e8ee;
+    --muted: #8b91a1;
+    --accent: #5b8cff;
+    --accent-text: #0b0e14;
+    --danger: #ff6b6b;
+    --ench: #d2a3ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px;
+  }
+  header { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; margin-bottom: 4px; }
+  h1 { font-size: 20px; margin: 0; }
+  a { color: var(--accent); text-decoration: none; font-size: 13px; }
+  a:hover { text-decoration: underline; }
+  .sub { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
+
+  .toolbar {
+    display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 14px; margin-bottom: 18px;
+  }
+  input[type=text], input[type=number], select {
+    background: var(--slot); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); padding: 6px 8px; font-size: 13px;
+  }
+  input[type=text] { flex: 1; min-width: 160px; }
+  label.check { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); cursor: pointer; }
+  button {
+    background: var(--accent); color: var(--accent-text); border: none; border-radius: 6px;
+    padding: 7px 12px; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  button.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  button:hover { filter: brightness(1.1); }
+
+  /* Storage on the left, the two chests you actually interact with pinned on the right. */
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; align-items: start; }
+  @media (max-width: 1040px) { .layout { grid-template-columns: 1fr; } }
+  .sidebar { position: sticky; top: 24px; display: flex; flex-direction: column; gap: 16px; }
+
+  .chests { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 16px; }
+  .chest {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px;
+  }
+  .chest.dim { opacity: 0.35; }
+  .chest-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 10px; }
+  .coords { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .kind { font-size: 11px; color: var(--muted); }
+  .fill { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
+  .stale { color: var(--danger); }
+  .role { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--accent); }
+
+  .grid { display: grid; grid-template-columns: repeat(9, 1fr); gap: 3px; }
+  .slot {
+    position: relative; aspect-ratio: 1;
+    background: var(--slot); border: 1px solid var(--slot-border); border-radius: 3px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 700; letter-spacing: -0.02em;
+    overflow: hidden;
+  }
+  .slot.filled { border-color: transparent; }
+  .slot[draggable=true] { cursor: grab; }
+  .slot img {
+    position: absolute; inset: 8%;
+    width: 84%; height: 84%;
+    image-rendering: pixelated;
+    -ms-interpolation-mode: nearest-neighbor;
+  }
+  .slot .count {
+    position: absolute; right: 1px; bottom: 0;
+    font-size: 9px; font-weight: 700; color: #fff;
+    text-shadow: 1px 1px 0 rgba(0,0,0,0.85);
+    font-variant-numeric: tabular-nums;
+  }
+  .slot.match { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .slot.faded { opacity: 0.18; }
+
+  /* Enchanted stacks get the vanilla-ish shimmer plus a corner mark. */
+  .slot.ench::after {
+    content: ''; position: absolute; inset: 0; pointer-events: none;
+    background: linear-gradient(115deg, transparent 32%, rgba(190,120,255,0.5) 50%, transparent 68%);
+    background-size: 250% 100%;
+    animation: glint 2.6s linear infinite;
+  }
+  @keyframes glint { from { background-position: 130% 0; } to { background-position: -70% 0; } }
+  .slot .ench-mark {
+    position: absolute; left: 1px; top: -1px; font-size: 10px; color: var(--ench);
+    text-shadow: 1px 1px 0 rgba(0,0,0,0.9); pointer-events: none; z-index: 1;
+  }
+  .slot .dura {
+    position: absolute; left: 2px; right: 2px; bottom: 2px; height: 2px;
+    background: rgba(0,0,0,0.65); border-radius: 1px; z-index: 1;
+  }
+  .slot .dura i { display: block; height: 100%; border-radius: 1px; }
+
+  .dropzone { transition: outline-color 0.1s; }
+  .dropzone.over { outline: 2px dashed var(--accent); outline-offset: -4px; }
+  .hint { font-size: 11px; color: var(--muted); margin-top: 10px; line-height: 1.45; }
+  .request { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 10px; }
+  .request .what { font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+  .request .where { font-size: 11px; color: var(--muted); margin-bottom: 8px; font-variant-numeric: tabular-nums; }
+  .request .actions { display: flex; gap: 8px; }
+  .empty-note { color: var(--muted); font-size: 13px; padding: 24px 0; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Chests</h1>
+    <a href="/">&larr; Control panel</a>
+  </header>
+  <p class="sub" id="summary">loading...</p>
+
+  <div class="toolbar">
+    <input type="text" id="filter" placeholder="Highlight item (e.g. diamond)..." oninput="render()">
+    <select id="sort" onchange="render()">
+      <option value="pos">Sort by position (Y, then X, Z)</option>
+      <option value="fullest">Sort by fullest</option>
+      <option value="emptiest">Sort by emptiest</option>
+      <option value="recent">Sort by most recently opened</option>
+    </select>
+    <label class="check"><input type="checkbox" id="hideUnopened" onchange="render()"> Hide never-opened</label>
+    <label class="check"><input type="checkbox" id="onlyMatches" onchange="render()"> Only matching chests</label>
+  </div>
+
+  <div class="layout">
+    <div class="chests" id="chests"></div>
+    <div class="sidebar">
+      <div class="chest dropzone" id="outputPanel"></div>
+      <div class="chest" id="inputPanel"></div>
+    </div>
+  </div>
+
+<script>
+let chests = [];
+let setup = {};
+let request = null;   // the stack dragged onto the output chest, awaiting confirmation
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+// Stable colour per item id, so the same item is always the same swatch across every chest.
+function hue(id) {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 360;
+  return h;
+}
+
+// minecraft:red_stained_glass -> RSG, minecraft:diamond -> DIA
+function abbrev(id) {
+  const name = id.replace(/^[^:]+:/, '');
+  const words = name.split('_').filter(Boolean);
+  if (words.length > 1) return words.slice(0, 3).map(w => w[0]).join('').toUpperCase();
+  return name.slice(0, 3).toUpperCase();
+}
+
+function shortName(id) {
+  return id.replace(/^minecraft:/, '');
+}
+
+function slotCount(chest) {
+  if (chest.size > 0) return chest.size;
+  let highest = 0;
+  for (const s of chest.slots || []) highest = Math.max(highest, s.slot + 1);
+  return Math.max(27, Math.ceil(highest / 9) * 9);
+}
+
+function ago(ts) {
+  if (!ts) return 'never opened';
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  return Math.floor(s / 86400) + 'd ago';
+}
+
+function samePos(a, b) {
+  return a && b && a.x === b.x && a.y === b.y && a.z === b.z;
+}
+
+// The index keys a double chest by its LEFT half, which may not be the half typed into setup -
+// the server resolves both halves for us, so match against either.
+function findChest(halves, fallback) {
+  const candidates = (halves && halves.length) ? halves : (fallback ? [fallback] : []);
+  for (const pos of candidates) {
+    const hit = chests.find(c => c && c.pos && samePos(c.pos, pos));
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function tooltip(item) {
+  const lines = [(item.customName ? item.customName + ' (' + shortName(item.item) + ')' : shortName(item.item))
+                 + ' x' + item.count];
+  for (const e of item.enchants || []) lines.push('  ' + e.replace(/_/g, ' '));
+  if (item.maxDamage) lines.push('durability ' + (item.maxDamage - item.damage) + '/' + item.maxDamage);
+  lines.push('slot ' + item.slot);
+  return lines.join('\n');
+}
+
+function renderSlot(item, index, filter, draggable, chest) {
+  if (!item) return '<div class="slot" title="slot ' + index + ' - empty"></div>';
+
+  const isMatch = filter && (item.item.toLowerCase().includes(filter)
+    || (item.customName || '').toLowerCase().includes(filter)
+    || (item.enchants || []).some(e => e.toLowerCase().includes(filter)));
+  const enchanted = !!(item.enchants && item.enchants.length);
+
+  let cls = 'slot filled';
+  if (enchanted) cls += ' ench';
+  if (isMatch) cls += ' match';
+  else if (filter) cls += ' faded';
+
+  const bg = 'hsl(' + hue(item.item) + ' 42% 32%)';
+  const fg = 'hsl(' + hue(item.item) + ' 70% 82%)';
+
+  let extras = '';
+  if (enchanted) extras += '<span class="ench-mark">&#10022;</span>';
+  if (item.maxDamage) {
+    const left = Math.max(0, 1 - item.damage / item.maxDamage);
+    extras += '<span class="dura"><i style="width:' + (left * 100).toFixed(0) + '%;background:hsl('
+      + Math.round(left * 120) + ' 80% 45%)"></i></span>';
+  }
+
+  const dragAttrs = draggable
+    ? ' draggable="true" ondragstart="startDrag(event, ' + esc(JSON.stringify(JSON.stringify({
+        item: item.item, count: item.count, slot: item.slot, chest: chest.pos
+      }))) + ')"'
+    : '';
+
+  return '<div class="' + cls + '" style="background:' + bg + ';color:' + fg + '"'
+    + ' title="' + esc(tooltip(item)) + '"' + dragAttrs + '>'
+    + esc(abbrev(item.item))
+    + '<img alt="" loading="lazy" src="/api/texture?item=' + encodeURIComponent(item.item) + '" onerror="this.remove()">'
+    + extras
+    + '<span class="count">' + item.count + '</span></div>';
+}
+
+function renderGrid(chest, filter, draggable) {
+  const size = slotCount(chest);
+  const bySlot = new Map();
+  for (const s of chest.slots || []) bySlot.set(s.slot, s);
+  let matched = false;
+  let cells = '';
+  for (let i = 0; i < size; i++) {
+    const item = bySlot.get(i);
+    if (item && filter && (item.item.toLowerCase().includes(filter)
+        || (item.customName || '').toLowerCase().includes(filter))) matched = true;
+    cells += renderSlot(item, i, filter, draggable && !!item, chest);
+  }
+  return { html: '<div class="grid">' + cells + '</div>', matched, size };
+}
+
+function chestHead(chest, size, role) {
+  const total = (chest.slots || []).reduce((n, s) => n + s.count, 0);
+  return '<div class="chest-head">'
+    + '<div>' + (role ? '<div class="role">' + role + '</div>' : '')
+    + '<div class="coords">' + chest.pos.x + ', ' + chest.pos.y + ', ' + chest.pos.z + '</div>'
+    + '<div class="kind">' + esc(shortName(chest.type || 'container')) + '</div></div>'
+    + '<div class="fill">' + (chest.slots || []).length + '/' + size + ' slots<br>'
+    + total + ' items<br>'
+    + '<span class="' + (chest.lastScanned ? '' : 'stale') + '">' + ago(chest.lastScanned) + '</span>'
+    + '</div></div>';
+}
+
+function renderChest(chest, filter) {
+  const grid = renderGrid(chest, filter, true);
+  return {
+    html: '<div class="chest' + (filter && !grid.matched ? ' dim' : '') + '">'
+      + chestHead(chest, grid.size, null) + grid.html + '</div>',
+    matched: grid.matched
+  };
+}
+
+function renderSidePanel(elementId, chest, role, configured, extraHtml) {
+  const el = document.getElementById(elementId);
+  if (!chest) {
+    el.innerHTML = '<div class="role">' + role + '</div>'
+      + '<p class="hint">' + (configured
+        ? 'Configured at ' + configured.x + ', ' + configured.y + ', ' + configured.z
+          + ' but not in the index yet - the bot records its contents the first time it opens it.'
+        : 'Not configured. Set it on the control panel.') + '</p>' + (extraHtml || '');
+    return;
+  }
+  const grid = renderGrid(chest, '', false);
+  el.innerHTML = chestHead(chest, grid.size, role) + grid.html + (extraHtml || '');
+}
+
+function requestHtml() {
+  if (!request) {
+    return '<p class="hint">Drag a stack here to have the bot fetch it to the output chest.</p>';
+  }
+  return '<div class="request">'
+    + '<div class="what">' + esc(shortName(request.item)) + ' &times; ' + request.count + '</div>'
+    + '<div class="where">from ' + request.chest.x + ', ' + request.chest.y + ', ' + request.chest.z
+    + ' &middot; slot ' + request.slot + '</div>'
+    + '<div class="actions"><button onclick="confirmRequest()">Request</button>'
+    + '<button class="secondary" onclick="cancelRequest()">Cancel</button></div>'
+    + '<p class="hint">The bot shift-clicks, so it moves the whole stack.</p>'
+    + '</div>';
+}
+
+function startDrag(event, payload) {
+  event.dataTransfer.setData('text/plain', payload);
+  event.dataTransfer.effectAllowed = 'copy';
+}
+
+function cancelRequest() {
+  request = null;
+  renderSidebar();
+}
+
+async function confirmRequest() {
+  if (!request) return;
+  const body = request;
+  request = null;
+  renderSidebar();
+  await fetch('/api/withdraw', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+}
+
+function renderSidebar() {
+  const resolved = setup.resolved || {};
+  renderSidePanel('outputPanel', findChest(resolved.output, setup.outputChest),
+    'Output chest', setup.outputChest, requestHtml());
+  renderSidePanel('inputPanel', findChest(resolved.input, setup.input),
+    'Input chest', setup.inputChest, null);
+}
+
+function sortChests(list, mode) {
+  const copy = list.slice();
+  if (mode === 'pos') copy.sort((a, b) => a.pos.y - b.pos.y || a.pos.x - b.pos.x || a.pos.z - b.pos.z);
+  else if (mode === 'fullest') copy.sort((a, b) => b.slots.length - a.slots.length);
+  else if (mode === 'emptiest') copy.sort((a, b) => a.slots.length - b.slots.length);
+  else if (mode === 'recent') copy.sort((a, b) => b.lastScanned - a.lastScanned);
+  return copy;
+}
+
+function render() {
+  const filter = document.getElementById('filter').value.trim().toLowerCase();
+  const mode = document.getElementById('sort').value;
+  const hideUnopened = document.getElementById('hideUnopened').checked;
+  const onlyMatches = document.getElementById('onlyMatches').checked;
+
+  const resolved = setup.resolved || {};
+  const sideChests = [findChest(resolved.output, setup.outputChest), findChest(resolved.input, setup.inputChest)]
+    .filter(Boolean);
+
+  // The input/output chests get their own panels, so keep them out of the storage grid.
+  let list = chests.filter(c => c && c.pos && !sideChests.includes(c));
+  if (hideUnopened) list = list.filter(c => c.lastScanned);
+
+  let html = '';
+  let shown = 0;
+  for (const chest of sortChests(list, mode)) {
+    const result = renderChest(chest, filter);
+    if (onlyMatches && filter && !result.matched) continue;
+    html += result.html;
+    shown++;
+  }
+  document.getElementById('chests').innerHTML = html
+    || '<p class="empty-note">No storage chests to show. Run a region scan from the control panel.</p>';
+
+  const slotsUsed = list.reduce((n, c) => n + (c.slots || []).length, 0);
+  const distinct = new Set();
+  let enchanted = 0;
+  for (const c of list) for (const s of c.slots || []) {
+    distinct.add(s.item);
+    if (s.enchants && s.enchants.length) enchanted++;
+  }
+  document.getElementById('summary').textContent =
+    shown + ' of ' + list.length + ' storage chests shown - ' + slotsUsed + ' slots used, '
+    + distinct.size + ' distinct items' + (enchanted ? ', ' + enchanted + ' enchanted' : '');
+
+  renderSidebar();
+}
+
+const outputPanel = document.getElementById('outputPanel');
+outputPanel.addEventListener('dragover', e => { e.preventDefault(); outputPanel.classList.add('over'); });
+outputPanel.addEventListener('dragleave', () => outputPanel.classList.remove('over'));
+outputPanel.addEventListener('drop', e => {
+  e.preventDefault();
+  outputPanel.classList.remove('over');
+  try {
+    request = JSON.parse(e.dataTransfer.getData('text/plain'));
+  } catch (err) {
+    return;
+  }
+  renderSidebar();
+});
+
+async function refresh() {
+  const [inv, setupRes] = await Promise.all([fetch('/api/inventory'), fetch('/api/setup')]);
+  chests = (await inv.json()).chests || [];
+  setup = await setupRes.json();
+  render();
+}
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>

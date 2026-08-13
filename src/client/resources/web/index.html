@@ -25,6 +25,8 @@
   }
   h1 { font-size: 20px; margin: 0 0 4px; }
   .sub { color: var(--muted); margin: 0 0 24px; font-size: 13px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
   @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
   .panel {
@@ -70,7 +72,7 @@
 </head>
 <body>
   <h1>Storage Manager</h1>
-  <p class="sub">Baritone-powered storage bot control panel</p>
+  <p class="sub">Baritone-powered storage bot control panel &middot; <a href="/chests">Browse chests &rarr;</a></p>
 
   <div class="grid">
     <div class="panel">
@@ -81,6 +83,7 @@
       <div class="actions">
         <button onclick="post('/api/scan')">Rescan storage</button>
         <button onclick="post('/api/sort')">Sort input chest</button>
+        <button class="secondary" onclick="randomize()">Randomize storage</button>
       </div>
     </div>
 
@@ -155,6 +158,12 @@ async function withdraw() {
   const count = parseInt(document.getElementById('withdrawCount').value, 10);
   if (!item || !count) return;
   await post('/api/withdraw', { item, count });
+}
+
+// Reshuffling every chest is a long job and there's no undo, so make a misclick harder.
+async function randomize() {
+  if (!confirm('Redistribute every known item into random chests? This can take a long time.')) return;
+  await post('/api/randomize');
 }
 
 function num(id) {
