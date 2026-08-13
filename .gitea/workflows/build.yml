@@ -1,0 +1,39 @@
+# Builds the mod for every Minecraft version declared in settings.gradle.kts and
+# uploads the jars as run artifacts.
+#
+# Requires Gitea Actions to be enabled and at least one act_runner registered with a
+# label this job can match (see `runs-on` below). Check Settings -> Actions -> Runners
+# on the instance if a push produces no run at all.
+
+name: build
+on: [push, pull_request]
+
+jobs:
+  build:
+    # act_runner's default label set includes ubuntu-latest; adjust if yours differs.
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v4
+
+      - name: setup jdk
+        uses: actions/setup-java@v4
+        with:
+          # 26.1.2 targets Java 25; a 25 toolchain also builds the Java 21 target.
+          java-version: '25'
+          distribution: 'temurin'
+
+      - name: make gradle wrapper executable
+        run: chmod +x ./gradlew
+
+      # Builds every version and copies the jars into build/libs/<mod version>/ so the
+      # upload below doesn't have to know the version list.
+      - name: build all versions
+        run: ./gradlew buildAndCollect --stacktrace
+
+      - name: capture build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: jars
+          path: build/libs/*/*.jar
+          if-no-files-found: error

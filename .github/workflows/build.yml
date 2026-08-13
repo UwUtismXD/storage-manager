@@ -21,10 +21,13 @@ jobs:
           distribution: 'microsoft'
       - name: make gradle wrapper executable
         run: chmod +x ./gradlew
+      # Builds every Minecraft version in settings.gradle.kts and collects the jars into
+      # build/libs/<mod version>/. Plain `build` also builds them all, but leaves each jar
+      # under versions/<mc version>/build/libs/.
       - name: build
-        run: ./gradlew build
+        run: ./gradlew buildAndCollect
       - name: capture build artifacts
         uses: actions/upload-artifact@v7
         with:
           name: Artifacts
-          path: build/libs/
+          path: build/libs/*/*.jar

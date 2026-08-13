@@ -1,0 +1,26 @@
+mod.id = "storage-manager"
+mod.name = "Storage Manager"
+mod.group = "storage.manager"
+mod.version = "1.0.0"
+
+deps.fabric_loader = "0.19.3"
+loomx.loom_version = "1.17-SNAPSHOT"
+
+["1.21.8"]
+mod.mc_compat = "~1.21.8"
+mod.java = "21"
+# Real Baritone registers as mod id "baritone".
+mod.baritone_id = "baritone"
+mod.baritone_jar = "libs/baritone-api-fabric-1.15.0.jar"
+
+deps.fabric_api = "0.136.1+1.21.8"
+
+["26.1.2"]
+mod.mc_compat = "~26.1.2"
+mod.java = "25"
+# Meteor's fork displays as "Baritone" in launchers but registers id "baritone-meteor",
+# which is what the loader actually resolves `depends` against.
+mod.baritone_id = "baritone-meteor"
+mod.baritone_jar = "jars/baritone-meteor-26.1.jar"
+
+deps.fabric_api = "0.155.2+26.1.2"

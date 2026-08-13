@@ -1,8 +1,8 @@
 {
 	"schemaVersion": 1,
-	"id": "storage-manager",
+	"id": "${id}",
 	"version": "${version}",
-	"name": "Storage Manager",
+	"name": "${name}",
 	"description": "A Baritone-powered storage bot: walks to chests to store and fetch items, controlled via a local web UI.",
 	"authors": [
 		"UwUtismXD"
@@ -23,9 +23,9 @@
 	},
 	"depends": {
 		"fabricloader": ">=0.19.3",
-		"minecraft": "~1.21.8",
-		"java": ">=21",
+		"minecraft": "${minecraft}",
+		"java": ">=${java}",
 		"fabric-api": "*",
-		"baritone": "*"
+		"${baritone}": "*"
 	}
 }

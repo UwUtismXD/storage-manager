@@ -5,6 +5,11 @@ build/
 out/
 classes/
 
+# stonecutter - per-version subprojects, generated from settings.gradle.kts.
+# Sources stay in src/; only build output lands here.
+
+versions/
+
 # eclipse
 
 *.launch
