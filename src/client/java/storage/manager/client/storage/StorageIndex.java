@@ -10,10 +10,11 @@ import storage.manager.StorageManager;
 
 import java.io.IOException;
 import java.io.Reader;
-import java.io.Writer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -26,6 +27,11 @@ import java.util.Map;
  * should stage. Backed by a JSON file so state survives restarts. Every method
  * is synchronized because it's read from HTTP handler threads and written from
  * the client tick thread.
+ *
+ * <p>Writes are debounced: mutators only flag the index dirty and a background thread
+ * flushes at most once every {@link #SAVE_INTERVAL_MILLIS}. Saving inline on every change
+ * meant a region scan serialized the whole (growing) index once per chest found and again
+ * per chest visited - quadratic work, all of it stalling the client tick thread.
  */
 public class StorageIndex {
 
@@ -102,12 +108,16 @@ public class StorageIndex {
 
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
+    private static final long SAVE_INTERVAL_MILLIS = 5000L;
+
     private final Path file;
 
     private Region region = new Region();
     private Pos inputChest;
     private Pos outputChest;
     private final Map<String, ChestEntry> chests = new LinkedHashMap<>();
+    private final Object flushLock = new Object();
+    private boolean dirty;
 
     public StorageIndex() {
         this.file = FabricLoader.getInstance().getConfigDir()
@@ -134,19 +144,72 @@ public class StorageIndex {
         }
     }
 
-    public synchronized void save() {
-        try {
-            Files.createDirectories(file.getParent());
-            Data data = new Data();
-            data.region = region;
-            data.inputChest = inputChest;
-            data.outputChest = outputChest;
-            data.chests = chests;
-            try (Writer writer = Files.newBufferedWriter(file, StandardCharsets.UTF_8)) {
-                GSON.toJson(data, writer);
+    /** Starts the background flusher. Daemon, so it never holds the game open on exit. */
+    public void startAutoSave() {
+        Thread saver = new Thread(() -> {
+            while (true) {
+                try {
+                    Thread.sleep(SAVE_INTERVAL_MILLIS);
+                } catch (InterruptedException e) {
+                    return;
+                }
+                flush();
             }
-        } catch (IOException e) {
-            StorageManager.LOGGER.error("Failed to save storage index", e);
+        }, "storage-manager-index-saver");
+        saver.setDaemon(true);
+        saver.start();
+    }
+
+    private synchronized void markDirty() {
+        dirty = true;
+    }
+
+    /**
+     * Writes the index out if anything changed since the last flush. Serialization happens under
+     * the state lock (it needs a consistent view) but the file write doesn't, so a slow disk can't
+     * stall the tick thread behind it.
+     *
+     * <p>{@code flushLock} serializes whole flushes against each other - the background saver, a
+     * finishing job and the shutdown hook can all land here at once, and two overlapping writes
+     * could otherwise leave the older snapshot on disk.
+     */
+    public void flush() {
+        synchronized (flushLock) {
+            String json;
+            synchronized (this) {
+                if (!dirty) {
+                    return;
+                }
+                dirty = false;
+                Data data = new Data();
+                data.region = region;
+                data.inputChest = inputChest;
+                data.outputChest = outputChest;
+                data.chests = chests;
+                json = GSON.toJson(data);
+            }
+            try {
+                writeAtomically(json);
+            } catch (IOException e) {
+                StorageManager.LOGGER.error("Failed to save storage index", e);
+                markDirty(); // try again on the next flush rather than dropping the changes
+            }
+        }
+    }
+
+    /**
+     * Writes via a temp file and a rename. Now that saves are debounced each one carries up to
+     * {@link #SAVE_INTERVAL_MILLIS} of work, so a crash mid-write shouldn't be able to leave a
+     * half-written index behind - the old file stays intact until the new one is complete.
+     */
+    private void writeAtomically(String json) throws IOException {
+        Files.createDirectories(file.getParent());
+        Path temp = file.resolveSibling(file.getFileName() + ".tmp");
+        Files.writeString(temp, json, StandardCharsets.UTF_8);
+        try {
+            Files.move(temp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } catch (AtomicMoveNotSupportedException e) {
+            Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING);
         }
     }
 
@@ -162,17 +225,17 @@ public class StorageIndex {
         r.min = new Pos(min);
         r.max = new Pos(max);
         this.region = r;
-        save();
+        markDirty();
     }
 
     public synchronized void setInputChest(BlockPos pos) {
         this.inputChest = new Pos(pos);
-        save();
+        markDirty();
     }
 
     public synchronized void setOutputChest(BlockPos pos) {
         this.outputChest = new Pos(pos);
-        save();
+        markDirty();
     }
 
     public synchronized BlockPos getInputChest() {
@@ -204,13 +267,13 @@ public class StorageIndex {
         entry.lastScanned = now;
         entry.slots = slots;
         chests.put(entry.pos.key(), entry);
-        save();
+        markDirty();
     }
 
     /** Drops a stale entry, e.g. the redundant RIGHT half of a double chest from before dedup existed. */
     public synchronized void removeChest(BlockPos pos) {
         if (chests.remove(new Pos(pos).key()) != null) {
-            save();
+            markDirty();
         }
     }
 
@@ -225,10 +288,19 @@ public class StorageIndex {
         return new ArrayList<>(chests.values());
     }
 
-    /** Aggregate counts of every item across all known chests, for the web UI. */
-    public synchronized Map<String, Integer> totalCounts() {
+    /**
+     * Aggregate counts of every item held in storage, for the web UI.
+     *
+     * <p>{@code exclude} keeps the input/output chests out of the sum. They get indexed like any
+     * other chest the bot opens, so without this a withdrawal looks like it did nothing: the items
+     * leave a storage chest, land in the output chest, and the reported total never moves.
+     */
+    public synchronized Map<String, Integer> totalCounts(Collection<BlockPos> exclude) {
         Map<String, Integer> totals = new LinkedHashMap<>();
         for (ChestEntry chest : chests.values()) {
+            if (exclude.contains(chest.pos.toBlockPos())) {
+                continue;
+            }
             for (SlotEntry slot : chest.slots) {
                 totals.merge(slot.item, slot.count, Integer::sum);
             }

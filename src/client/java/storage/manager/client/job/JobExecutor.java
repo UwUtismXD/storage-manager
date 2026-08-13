@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * Drains {@link JobQueue} one job at a time on the client tick thread. Each job is expanded
@@ -37,7 +38,10 @@ import java.util.TreeMap;
  */
 public class JobExecutor {
 
-    private enum VisitKind { SCAN, WITHDRAW_ITEM, DEPOSIT_ITEM, READ_INPUT, DEPOSIT_TO_OUTPUT, TAKE_ALL, DEPOSIT_RANDOM }
+    private enum VisitKind {
+        SCAN, WITHDRAW_ITEM, DEPOSIT_ITEM, READ_INPUT, READ_INPUT_RANDOM,
+        DEPOSIT_TO_OUTPUT, TAKE_ALL, DEPOSIT_RANDOM
+    }
 
     /** {@code slot} is -1 unless the visit targets one specific container slot (exact withdrawals). */
     private record Visit(BlockPos pos, VisitKind kind, String itemId, List<BlockPos> triedChests, int slot) {
@@ -50,7 +54,7 @@ public class JobExecutor {
         }
     }
 
-    private enum Phase { PATHING, OPENING, ACTING, CLOSING }
+    private enum Phase { PATHING, OPENING, ACTING }
 
     private static final double ARRIVE_RANGE = 3.5;
     private static final long PATH_TIMEOUT_TICKS = 20L * 60;   // 60s
@@ -59,6 +63,13 @@ public class JobExecutor {
     /** Upper bound on quick-moves in one deposit visit - the bot can't carry more than this. */
     private static final int MAX_DEPOSITS_PER_VISIT = 36;
     private static final long RESERVED_REFRESH_TICKS = 20L; // 1s
+
+    /** Idle-stroll pacing. Randomized between these so it doesn't read as clockwork. */
+    private static final long WANDER_MIN_IDLE_TICKS = 20L * 120; // 2min
+    private static final long WANDER_MAX_IDLE_TICKS = 20L * 300; // 5min
+    /** Baritone takes a moment to start pathing; don't read "not pathing yet" as "arrived". */
+    private static final long WANDER_START_GRACE_TICKS = 40L;
+    private static final long WANDER_TIMEOUT_TICKS = 20L * 60;
 
     private final JobQueue queue;
     private final BotNavigator navigator = new BotNavigator();
@@ -70,6 +81,17 @@ public class JobExecutor {
      * the web UI, which needs to label them but runs on HTTP threads where world access isn't safe.
      */
     public record ReservedChests(List<StorageIndex.Pos> input, List<StorageIndex.Pos> output) {
+        /** Both roles flattened to block positions, for "is this chest spoken for" checks. */
+        public Set<BlockPos> positions() {
+            Set<BlockPos> all = new HashSet<>();
+            for (StorageIndex.Pos pos : input) {
+                all.add(pos.toBlockPos());
+            }
+            for (StorageIndex.Pos pos : output) {
+                all.add(pos.toBlockPos());
+            }
+            return all;
+        }
     }
 
     private volatile ReservedChests reservedSnapshot = new ReservedChests(List.of(), List.of());
@@ -83,6 +105,12 @@ public class JobExecutor {
     private boolean paused;
     private String lastWarning = "";
 
+    private volatile boolean wanderEnabled = true;
+    private boolean wandering;
+    private long idleTicks;
+    private long wanderTicks;
+    private long nextWanderTicks = WANDER_MIN_IDLE_TICKS;
+
     public JobExecutor(JobQueue queue, StorageIndex index) {
         this.queue = queue;
         this.index = index;
@@ -90,6 +118,7 @@ public class JobExecutor {
 
     public void pause() {
         if (!paused) {
+            stopWandering();
             navigator.cancel();
         }
         paused = true;
@@ -108,7 +137,7 @@ public class JobExecutor {
             return "paused";
         }
         if (currentJob == null) {
-            return "idle (" + queue.size() + " queued)";
+            return "idle (" + queue.size() + " queued)" + (wandering ? " - wandering" : "");
         }
         return currentJob + " - " + phase;
     }
@@ -143,8 +172,12 @@ public class JobExecutor {
         if (currentJob == null) {
             currentJob = queue.poll();
             if (currentJob == null) {
+                tickIdle();
                 return;
             }
+            // Real work turned up - abandon any stroll before planning, so Baritone isn't still
+            // heading somewhere else when the first visit starts.
+            stopWandering();
             plan = buildPlan(currentJob);
             if (!advanceVisit()) {
                 finishJob();
@@ -156,8 +189,63 @@ public class JobExecutor {
             case PATHING -> tickPathing();
             case OPENING -> tickOpening();
             case ACTING -> tickActing();
-            case CLOSING -> tickClosing();
         }
+    }
+
+    /**
+     * Sends the bot on a stroll to a random known chest every few minutes while there's nothing to
+     * do, so it doesn't stand frozen in one spot. Targets are chests it has already been to rather
+     * than random points in the region box - those are known-reachable, and it reads as the bot
+     * looking around its own storage rather than walking into a wall.
+     *
+     * <p>Deliberately not a queued {@link Job}: strolling should never delay real work or show up
+     * in the queue, and any job arriving cancels it mid-path.
+     */
+    private void tickIdle() {
+        if (wandering) {
+            wanderTicks++;
+            boolean arrived = wanderTicks > WANDER_START_GRACE_TICKS && !navigator.isBusy();
+            if (arrived || wanderTicks > WANDER_TIMEOUT_TICKS) {
+                stopWandering();
+            }
+            return;
+        }
+        if (!wanderEnabled) {
+            return;
+        }
+        if (++idleTicks < nextWanderTicks) {
+            return;
+        }
+        BlockPos target = index.randomStorageChests(Set.of()).stream().findFirst().orElse(null);
+        if (target == null) {
+            idleTicks = 0; // nothing indexed to stroll to yet - check again after another interval
+            return;
+        }
+        navigator.goTo(target);
+        wandering = true;
+        wanderTicks = 0;
+    }
+
+    /** Ends any stroll (cancelling the path) and re-arms the idle timer. */
+    private void stopWandering() {
+        if (wandering) {
+            // cancel() also releases keys Baritone may still be holding, which matters before the
+            // next chest open - a forced sneak turns right-click into a block placement.
+            navigator.cancel();
+            wandering = false;
+        }
+        idleTicks = 0;
+        wanderTicks = 0;
+        nextWanderTicks = ThreadLocalRandom.current()
+                .nextLong(WANDER_MIN_IDLE_TICKS, WANDER_MAX_IDLE_TICKS + 1);
+    }
+
+    public boolean isWanderEnabled() {
+        return wanderEnabled;
+    }
+
+    public void setWanderEnabled(boolean enabled) {
+        wanderEnabled = enabled;
     }
 
     private Deque<Visit> buildPlan(Job job) {
@@ -165,18 +253,28 @@ public class JobExecutor {
         switch (job.type) {
             case SCAN_REGION -> {
                 discoverChestsInRegion();
+                // Discovery always runs (it's cheap and finds newly-placed chests); the freshness
+                // bound only decides which chests are worth walking to and opening again.
+                long cutoff = job.maxAgeMillis > 0
+                        ? System.currentTimeMillis() - job.maxAgeMillis
+                        : Long.MAX_VALUE;
                 List<BlockPos> targets = new ArrayList<>();
                 for (StorageIndex.ChestEntry chest : index.allChests()) {
-                    targets.add(chest.pos.toBlockPos());
+                    if (chest.lastScanned < cutoff) {
+                        targets.add(chest.pos.toBlockPos());
+                    }
                 }
                 for (BlockPos pos : scanOrder(targets)) {
                     plan.add(new Visit(pos, VisitKind.SCAN, null));
                 }
             }
-            case SORT_INPUT -> {
+            case SORT_INPUT, SORT_INPUT_RANDOM -> {
                 BlockPos input = index.getInputChest();
                 if (input != null) {
-                    plan.add(new Visit(input, VisitKind.READ_INPUT, null));
+                    VisitKind kind = job.type == Job.Type.SORT_INPUT_RANDOM
+                            ? VisitKind.READ_INPUT_RANDOM
+                            : VisitKind.READ_INPUT;
+                    plan.add(new Visit(input, kind, null));
                 }
             }
             case WITHDRAW -> {
@@ -282,18 +380,9 @@ public class JobExecutor {
      * entirely whenever those two disagree.
      */
     private Set<BlockPos> reservedChests() {
-        List<StorageIndex.Pos> input = chestHalves(index.getInputChest());
-        List<StorageIndex.Pos> output = chestHalves(index.getOutputChest());
-        reservedSnapshot = new ReservedChests(input, output);
-
-        Set<BlockPos> reserved = new HashSet<>();
-        for (StorageIndex.Pos pos : input) {
-            reserved.add(pos.toBlockPos());
-        }
-        for (StorageIndex.Pos pos : output) {
-            reserved.add(pos.toBlockPos());
-        }
-        return reserved;
+        reservedSnapshot = new ReservedChests(
+                chestHalves(index.getInputChest()), chestHalves(index.getOutputChest()));
+        return reservedSnapshot.positions();
     }
 
     /** A chest position plus its other half if it's a double chest, else just the position. */
@@ -332,14 +421,51 @@ public class JobExecutor {
         return block instanceof ChestBlock || block instanceof BarrelBlock || block instanceof ShulkerBoxBlock;
     }
 
-    /** Pops the next visit and starts pathing to it. Returns false if the plan is empty. */
+    /**
+     * Pops the next visit and starts it. Returns false if the plan is empty.
+     *
+     * <p>A storage room is mostly chests already within arm's reach of each other, so the next
+     * target is usually reachable from where the last one left us. Those skip pathing entirely -
+     * previously every visit issued a Baritone goal that {@link #tickPathing()} cancelled a tick
+     * later, which meant starting and aborting a path calculation per chest without moving.
+     */
     private boolean advanceVisit() {
-        if (plan == null || plan.isEmpty()) {
+        while (plan != null && !plan.isEmpty()) {
+            currentVisit = plan.poll();
+            phaseTicks = 0;
+            if (!navigator.hasArrived(currentVisit.pos(), ARRIVE_RANGE)) {
+                navigator.goTo(currentVisit.pos());
+                phase = Phase.PATHING;
+                return true;
+            }
+            if (openCurrentVisit()) {
+                return true;
+            }
+            // Container's gone - it's already been dropped from the index, so try the next visit.
+        }
+        return false;
+    }
+
+    /**
+     * Sends the open for the current visit, now that we're in range. Returns false if the block
+     * turned out not to be a container anymore, in which case it's dropped from the index.
+     */
+    private boolean openCurrentVisit() {
+        // Stop Baritone's own movement/look/sneak control before we try to interact - if it's
+        // still actively adjusting position (its own GoalNear radius is tighter than
+        // ARRIVE_RANGE) our interact can lose to whatever input it's still holding, e.g. a
+        // sneak override used for edge safety, which makes right-click try to place a held
+        // item instead of opening the container.
+        navigator.cancel();
+        if (!isContainerBlock(currentVisit.pos())) {
+            // Whatever was here got broken/moved since the last scan - drop it from the index
+            // instead of trying (and timing out) forever on a chest that no longer exists.
+            warn("No container at {} anymore, removing from index", currentVisit.pos());
+            index.removeChest(currentVisit.pos());
             return false;
         }
-        currentVisit = plan.poll();
-        navigator.goTo(currentVisit.pos());
-        phase = Phase.PATHING;
+        interactor.open(currentVisit.pos());
+        phase = Phase.OPENING;
         phaseTicks = 0;
         return true;
     }
@@ -347,23 +473,9 @@ public class JobExecutor {
     private void tickPathing() {
         phaseTicks++;
         if (navigator.hasArrived(currentVisit.pos(), ARRIVE_RANGE)) {
-            // Stop Baritone's own movement/look/sneak control before we try to interact - if it's
-            // still actively adjusting position (its own GoalNear radius is tighter than
-            // ARRIVE_RANGE) our interact can lose to whatever input it's still holding, e.g. a
-            // sneak override used for edge safety, which makes right-click try to place a held
-            // item instead of opening the container.
-            navigator.cancel();
-            if (!isContainerBlock(currentVisit.pos())) {
-                // Whatever was here got broken/moved since the last scan - drop it from the index
-                // instead of trying (and timing out) forever on a chest that no longer exists.
-                warn("No container at {} anymore, removing from index", currentVisit.pos());
-                index.removeChest(currentVisit.pos());
+            if (!openCurrentVisit()) {
                 nextVisitOrFinish();
-                return;
             }
-            interactor.open(currentVisit.pos());
-            phase = Phase.OPENING;
-            phaseTicks = 0;
             return;
         }
         if (!navigator.isBusy()) {
@@ -385,8 +497,9 @@ public class JobExecutor {
             return;
         }
         // The first attempt can lose a race with leftover Baritone input state - retry rather
-        // than only trying once and waiting out the full timeout.
-        if (phaseTicks % 10 == 0) {
+        // than only trying once and waiting out the full timeout. Every 4 ticks (5/s, about as
+        // fast as a person clicks) rather than every 10, so a dropped open costs 200ms not 500ms.
+        if (phaseTicks % 4 == 0) {
             interactor.open(currentVisit.pos());
         }
         if (phaseTicks > OPEN_TIMEOUT_TICKS) {
@@ -400,7 +513,7 @@ public class JobExecutor {
         switch (currentVisit.kind()) {
             case SCAN -> {
                 recordSnapshot(currentVisit.pos());
-                phase = Phase.CLOSING;
+                finishVisit();
             }
             case WITHDRAW_ITEM -> {
                 int slot = currentVisit.slot();
@@ -414,7 +527,7 @@ public class JobExecutor {
                     interactor.quickMove(slot);
                 }
                 recordSnapshot(currentVisit.pos());
-                phase = Phase.CLOSING;
+                finishVisit();
             }
             case DEPOSIT_ITEM, DEPOSIT_RANDOM -> {
                 String itemId = currentVisit.itemId();
@@ -463,7 +576,7 @@ public class JobExecutor {
                     }
                 }
                 recordSnapshot(currentVisit.pos());
-                phase = Phase.CLOSING;
+                finishVisit();
             }
             case TAKE_ALL -> {
                 BlockPos source = currentVisit.pos();
@@ -501,28 +614,36 @@ public class JobExecutor {
                     plan.addFirst(followUps.get(i));
                 }
                 recordSnapshot(source);
-                phase = Phase.CLOSING;
+                finishVisit();
             }
             case DEPOSIT_TO_OUTPUT -> {
                 int slot = interactor.findPlayerSlotWithItem(currentVisit.itemId());
                 if (slot < 0) {
                     recordSnapshot(currentVisit.pos());
-                    phase = Phase.CLOSING;
+                    finishVisit();
                 } else if (phaseTicks > ACTING_TIMEOUT_TICKS) {
                     // Still holding some after 10s - most likely the output chest is full.
                     warn("Could not fully deposit {} at {}, output chest may be full",
                             currentVisit.itemId(), currentVisit.pos());
                     recordSnapshot(currentVisit.pos());
-                    phase = Phase.CLOSING;
+                    finishVisit();
                 } else {
                     interactor.quickMove(slot);
                     // Stay in ACTING until no more of this item is left to deposit.
                 }
             }
-            case READ_INPUT -> {
+            case READ_INPUT, READ_INPUT_RANDOM -> {
+                // Scattering sends each stack to its own random chest, so nothing becomes the one
+                // chest holding all the diamonds. Sorting instead consolidates each item together.
+                boolean scatter = currentVisit.kind() == VisitKind.READ_INPUT_RANDOM;
                 List<StorageIndex.SlotEntry> contents = interactor.snapshotContainerSlots();
                 int capacity = interactor.countFreePlayerSlots();
                 Set<BlockPos> reserved = reservedChests();
+                // Shuffled once and drawn from in order, so no two stacks in this pass land in the
+                // same chest - picking a fresh random chest per stack could hand out duplicates.
+                Deque<BlockPos> scatterTargets = scatter
+                        ? new ArrayDeque<>(index.randomStorageChests(reserved))
+                        : new ArrayDeque<>();
                 Set<String> takenItems = new LinkedHashSet<>();
                 boolean outOfSpace = false;
                 int taken = 0;
@@ -537,7 +658,8 @@ public class JobExecutor {
                     // Confirm there's somewhere to put it before pulling it out - with the
                     // input/output chests now excluded, a region that hasn't been scanned yet has
                     // no candidates at all, and taking it anyway would strand it in the inventory.
-                    if (index.depositCandidates(entry.item, reserved).isEmpty()) {
+                    if (scatter ? scatterTargets.isEmpty()
+                            : index.depositCandidates(entry.item, reserved).isEmpty()) {
                         warn("No storage chest to sort {} into - rescan the region first", entry.item);
                         break;
                     }
@@ -545,7 +667,12 @@ public class JobExecutor {
                     // reading the snapshot alone never removed anything.
                     interactor.quickMove(entry.slot);
                     taken++;
-                    takenItems.add(entry.item);
+                    if (scatter) {
+                        // One visit per stack, each to its own chest - the whole point here.
+                        plan.add(new Visit(scatterTargets.poll(), VisitKind.DEPOSIT_RANDOM, entry.item));
+                    } else {
+                        takenItems.add(entry.item);
+                    }
                 }
                 // One visit per distinct item, not per stack. DEPOSIT_ITEM now unloads every stack
                 // of an item in a single visit, so queueing one per slot just sent the bot to walk
@@ -561,10 +688,10 @@ public class JobExecutor {
                 // bot that's already full (capacity 0) re-queues SORT_INPUT forever without moving
                 // a single item.
                 if (outOfSpace && taken > 0) {
-                    queue.enqueue(Job.sortInput());
+                    queue.enqueue(scatter ? Job.sortInputRandom() : Job.sortInput());
                 }
                 recordSnapshot(currentVisit.pos());
-                phase = Phase.CLOSING;
+                finishVisit();
             }
         }
     }
@@ -575,13 +702,18 @@ public class JobExecutor {
         if (client.level != null) {
             type = BuiltInRegistries.BLOCK.getKey(client.level.getBlockState(pos).getBlock()).toString();
         }
-        // Both reads have to happen while the container is still open - this runs during ACTING,
-        // before tickClosing() sends the close.
+        // Both reads have to happen while the container is still open - callers run this during
+        // ACTING, before finishVisit() sends the close.
         index.upsertChest(pos, type, interactor.containerSlotCount(),
                 interactor.snapshotContainerSlots(), System.currentTimeMillis());
     }
 
-    private void tickClosing() {
+    /**
+     * Closes the container and moves straight on to the next visit, in the same tick. This used to
+     * be a CLOSING phase of its own, which cost an extra tick per chest for no benefit - every
+     * caller has already finished reading the container by the time it gets here.
+     */
+    private void finishVisit() {
         interactor.close();
         nextVisitOrFinish();
     }
@@ -596,5 +728,8 @@ public class JobExecutor {
         currentJob = null;
         plan = null;
         currentVisit = null;
+        // Index writes are debounced, but a just-finished job is a natural point to persist at
+        // rather than leaving the last few chests riding on the background flush.
+        index.flush();
     }
 }

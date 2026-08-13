@@ -29,6 +29,7 @@
   a:hover { text-decoration: underline; }
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
   @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+  .col { display: flex; flex-direction: column; gap: 16px; }
   .panel {
     background: var(--panel);
     border: 1px solid var(--border);
@@ -67,7 +68,16 @@
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
   .dot.paused { background: var(--danger); }
   .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  label.check {
+    display: flex; align-items: center; gap: 6px; margin: 12px 0 0;
+    font-size: 12px; color: var(--muted); cursor: pointer;
+  }
   .search { margin-bottom: 10px; }
+  .withdraw-head { text-align: right; }
+  .withdraw-cell { display: flex; gap: 6px; justify-content: flex-end; }
+  .withdraw-cell input[type=number] { width: 68px; padding: 4px 6px; font-size: 12px; }
+  .withdraw-cell button { padding: 4px 10px; font-size: 12px; }
+  .empty-note { color: var(--muted); font-size: 13px; padding: 16px 0; }
 </style>
 </head>
 <body>
@@ -75,6 +85,9 @@
   <p class="sub">Baritone-powered storage bot control panel &middot; <a href="/chests">Browse chests &rarr;</a></p>
 
   <div class="grid">
+    <!-- Two explicit columns rather than letting three panels flow: the inventory is much
+         taller than the others, so auto-placement left a dead gap under the status panel. -->
+    <div class="col">
     <div class="panel">
       <h2>Status</h2>
       <div class="status-line"><span class="dot" id="statusDot"></span><span id="statusText">loading...</span></div>
@@ -82,33 +95,16 @@
       <div id="warningText" class="sub" style="color: var(--danger); display: none;"></div>
       <div class="actions">
         <button onclick="post('/api/scan')">Rescan storage</button>
+        <button class="secondary" onclick="post('/api/scan', { maxAgeSeconds: 900 })"
+                title="Finds newly-placed chests, but only re-opens ones not seen in the last 15 minutes">Quick rescan</button>
         <button onclick="post('/api/sort')">Sort input chest</button>
+        <button class="secondary" onclick="post('/api/sort', { random: true })"
+                title="Empties the input chest one stack per random chest, so no single chest holds all of anything">Scatter input chest</button>
         <button class="secondary" onclick="randomize()">Randomize storage</button>
       </div>
-    </div>
-
-    <div class="panel">
-      <h2>Withdraw item</h2>
-      <div class="row">
-        <div>
-          <label>Item id (e.g. minecraft:diamond)</label>
-          <input type="text" id="withdrawItem" placeholder="minecraft:diamond">
-        </div>
-        <div style="flex: 0 0 100px">
-          <label>Count</label>
-          <input type="number" id="withdrawCount" value="64" min="1">
-        </div>
-      </div>
-      <button onclick="withdraw()">Withdraw to output chest</button>
-    </div>
-
-    <div class="panel">
-      <h2>Inventory</h2>
-      <input class="search" type="text" id="search" placeholder="Filter items..." oninput="renderInventory()">
-      <table>
-        <thead><tr><th>Item</th><th>Count</th></tr></thead>
-        <tbody id="inventoryBody"></tbody>
-      </table>
+      <label class="check" title="Every 2-5 minutes with nothing queued, the bot strolls to a random chest instead of standing still">
+        <input type="checkbox" id="wander" onchange="setWander()"> Wander around storage when idle
+      </label>
     </div>
 
     <div class="panel">
@@ -139,6 +135,18 @@
       </div>
       <button class="secondary" onclick="saveSetup()">Save setup</button>
     </div>
+    </div>
+
+    <div class="col">
+    <div class="panel">
+      <h2>Inventory</h2>
+      <input class="search" type="text" id="search" placeholder="Filter items..." oninput="renderInventory()">
+      <table>
+        <thead><tr><th>Item</th><th>Count</th><th class="withdraw-head">Withdraw to output</th></tr></thead>
+        <tbody id="inventoryBody"></tbody>
+      </table>
+    </div>
+    </div>
   </div>
 
 <script>
@@ -153,11 +161,25 @@ async function post(path, body) {
   refreshStatus();
 }
 
-async function withdraw() {
-  const item = document.getElementById('withdrawItem').value.trim();
-  const count = parseInt(document.getElementById('withdrawCount').value, 10);
-  if (!item || !count) return;
+// Counts typed into the inventory rows, keyed by item id. Held outside the table because
+// renderInventory() rebuilds every row on each 10s refresh, which would otherwise wipe them.
+const withdrawCounts = {};
+
+async function withdrawItem(item, count) {
+  if (!item || !Number.isFinite(count) || count < 1) return;
   await post('/api/withdraw', { item, count });
+}
+
+// Guards the checkbox against being reverted by a status poll that's already in flight.
+let wanderPending = false;
+
+async function setWander() {
+  wanderPending = true;
+  try {
+    await post('/api/wander', { enabled: document.getElementById('wander').checked });
+  } finally {
+    wanderPending = false;
+  }
 }
 
 // Reshuffling every chest is a long job and there's no undo, so make a misclick harder.
@@ -182,18 +204,57 @@ async function saveSetup() {
   });
 }
 
+// Built with DOM calls rather than an innerHTML template so item ids - which end up in both
+// a value and a click handler - never need escaping.
 function renderInventory() {
   const filter = document.getElementById('search').value.toLowerCase();
   const body = document.getElementById('inventoryBody');
   body.innerHTML = '';
-  Object.entries(totals)
+
+  const rows = Object.entries(totals)
     .filter(([item]) => item.toLowerCase().includes(filter))
-    .sort((a, b) => b[1] - a[1])
-    .forEach(([item, count]) => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${item}</td><td>${count}</td>`;
-      body.appendChild(tr);
-    });
+    .sort((a, b) => b[1] - a[1]);
+
+  if (!rows.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 3;
+    td.className = 'empty-note';
+    td.textContent = Object.keys(totals).length
+      ? 'No items match that filter.'
+      : 'Storage is empty. Run a rescan to index what is out there.';
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+
+  for (const [item, count] of rows) {
+    const nameCell = document.createElement('td');
+    nameCell.textContent = item;
+
+    const countCell = document.createElement('td');
+    countCell.textContent = count;
+
+    const qty = document.createElement('input');
+    qty.type = 'number';
+    qty.min = '1';
+    qty.max = String(count);
+    // Defaults to a stack, or everything there is if that's less.
+    qty.value = withdrawCounts[item] !== undefined ? withdrawCounts[item] : Math.min(count, 64);
+    qty.oninput = () => { withdrawCounts[item] = qty.value; };
+
+    const button = document.createElement('button');
+    button.textContent = 'Withdraw';
+    button.onclick = () => withdrawItem(item, parseInt(qty.value, 10));
+
+    const actionCell = document.createElement('td');
+    actionCell.className = 'withdraw-cell';
+    actionCell.append(qty, button);
+
+    const tr = document.createElement('tr');
+    tr.append(nameCell, countCell, actionCell);
+    body.appendChild(tr);
+  }
 }
 
 async function refreshInventory() {
@@ -208,6 +269,9 @@ async function refreshStatus() {
   const data = await res.json();
   document.getElementById('statusText').textContent = data.status;
   document.getElementById('statusDot').className = 'dot' + (data.paused ? ' paused' : '');
+  if (!wanderPending) {
+    document.getElementById('wander').checked = !!data.wanderEnabled;
+  }
   document.getElementById('queueText').textContent = data.queueSize + ' job(s) queued: ' + data.queue.join(', ');
   const warningEl = document.getElementById('warningText');
   if (data.lastWarning) {

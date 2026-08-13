@@ -25,6 +25,7 @@ public class StorageManagerClient implements ClientModInitializer {
     public void onInitializeClient() {
         index = new StorageIndex();
         index.load();
+        index.startAutoSave();
 
         textures = new ItemTextures();
         textures.registerReloadListener();
@@ -55,7 +56,7 @@ public class StorageManagerClient implements ClientModInitializer {
         ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> executor.resume());
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            index.save();
+            index.flush();
             webServer.stop();
         }));
     }
