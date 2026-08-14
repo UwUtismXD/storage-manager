@@ -37,6 +37,11 @@ jobs:
       - name: make gradle wrapper executable
         run: chmod +x ./gradlew
 
+      # Runs the JUnit 5 test suite before building. A failing test blocks the jar so
+      # we never ship one that breaks the queue/sort/random logic.
+      - name: run tests
+        run: ./gradlew test
+
       # Builds every version and copies the jars into build/libs/<mod version>/ so the
       # upload below doesn't have to know the version list.
       - name: build all versions
