@@ -62,8 +62,13 @@ Then:
 - **Sort input chest** empties the input chest, grouping each item into a chest that already
   holds some. **Scatter input chest** instead sends one stack per random chest, so no single
   chest ends up holding all of anything.
-- **Randomize storage** redistributes everything already in storage the same way. It's a long
-  job with no undo.
+- **Randomize storage** redistributes everything already in storage the same way. The bot opens
+  each chest once, in random order, unloading part of what it's carrying into that chest and
+  picking up what was already there - so every stack moves exactly once and the pass costs one
+  visit per chest rather than one per stack. No undo.
+- **Stop** cancels the running job and everything queued behind it. Anything the bot is still
+  carrying goes into the nearest chest with room, so a half-finished shuffle doesn't leave items
+  riding around in its inventory.
 - The **Inventory** table has a per-row quantity box and Withdraw button; the bot fetches the
   item to the output chest. `/chests` also lets you drag a specific stack onto the output chest
   to request that exact slot.

@@ -22,6 +22,11 @@ public class JobQueue {
         return queue.size();
     }
 
+    /** Drops everything still waiting. Used by the stop button, which cancels the whole backlog. */
+    public void clear() {
+        queue.clear();
+    }
+
     public List<Job> snapshot() {
         return new ArrayList<>(queue);
     }

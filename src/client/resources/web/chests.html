@@ -48,6 +48,7 @@
     padding: 7px 12px; font-size: 13px; font-weight: 600; cursor: pointer;
   }
   button.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  button.danger { background: var(--danger); color: var(--accent-text); margin-left: auto; }
   button:hover { filter: brightness(1.1); }
 
   /* Storage on the left, the two chests you actually interact with pinned on the right. */
@@ -138,6 +139,8 @@
     </select>
     <label class="check"><input type="checkbox" id="hideUnopened" onchange="render()"> Hide never-opened</label>
     <label class="check"><input type="checkbox" id="onlyMatches" onchange="render()"> Only matching chests</label>
+    <button class="danger" onclick="stopBot()"
+            title="Cancels the running job and the whole queue, then puts anything the bot is carrying into the nearest chest with room">Stop</button>
   </div>
 
   <div class="layout">
@@ -318,6 +321,10 @@ function requestHtml() {
     + '<button class="secondary" onclick="cancelRequest()">Cancel</button></div>'
     + '<p class="hint">The bot shift-clicks, so it moves the whole stack.</p>'
     + '</div>';
+}
+
+async function stopBot() {
+  await fetch('/api/stop', { method: 'POST' });
 }
 
 function startDrag(event, payload) {

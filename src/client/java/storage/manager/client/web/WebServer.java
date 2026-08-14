@@ -64,6 +64,7 @@ public class WebServer {
             server.createContext("/api/scan", this::handleScan);
             server.createContext("/api/sort", this::handleSort);
             server.createContext("/api/randomize", this::handleRandomize);
+            server.createContext("/api/stop", this::handleStop);
             server.createContext("/api/wander", this::handleWander);
             server.createContext("/api/texture", this::handleTexture);
             server.createContext("/api/setup", this::handleSetup);
@@ -199,6 +200,19 @@ public class WebServer {
             return;
         }
         queue.enqueue(Job.randomize());
+        sendJson(exchange, 200, Map.of("ok", true));
+    }
+
+    /**
+     * Cancels the running job and everything queued behind it. Whatever the bot is still carrying
+     * is put back into the nearest chest with room rather than left in its inventory.
+     */
+    private void handleStop(HttpExchange exchange) throws IOException {
+        if (!"POST".equals(exchange.getRequestMethod())) {
+            exchange.sendResponseHeaders(405, -1);
+            return;
+        }
+        executor.requestStop();
         sendJson(exchange, 200, Map.of("ok", true));
     }
 

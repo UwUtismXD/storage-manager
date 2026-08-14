@@ -60,6 +60,7 @@
     cursor: pointer;
   }
   button.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  button.danger { background: var(--danger); color: var(--accent-text); }
   button:hover { filter: brightness(1.1); }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--border); }
@@ -101,6 +102,8 @@
         <button class="secondary" onclick="post('/api/sort', { random: true })"
                 title="Empties the input chest one stack per random chest, so no single chest holds all of anything">Scatter input chest</button>
         <button class="secondary" onclick="randomize()">Randomize storage</button>
+        <button class="danger" onclick="post('/api/stop')"
+                title="Cancels the running job and the whole queue, then puts anything the bot is carrying into the nearest chest with room">Stop</button>
       </div>
       <label class="check" title="Every 2-5 minutes with nothing queued, the bot strolls to a random chest instead of standing still">
         <input type="checkbox" id="wander" onchange="setWander()"> Wander around storage when idle
@@ -182,9 +185,10 @@ async function setWander() {
   }
 }
 
-// Reshuffling every chest is a long job and there's no undo, so make a misclick harder.
+// Reshuffling every chest has no undo, so make a misclick harder. It's one visit per chest now,
+// but that's still a walk around the whole storage room.
 async function randomize() {
-  if (!confirm('Redistribute every known item into random chests? This can take a long time.')) return;
+  if (!confirm('Redistribute every known item into random chests? Stop cancels it partway.')) return;
   await post('/api/randomize');
 }
 

@@ -36,6 +36,13 @@ public class ChestInteractor {
     /** Every vanilla container screen appends the player's own 36 inventory slots after the container's. */
     private static final int PLAYER_INVENTORY_SLOTS = 36;
 
+    /**
+     * Where those same 36 slots start in the player's <em>own</em> inventory menu, which lays out
+     * 0-4 crafting, 5-8 armour, 9-35 main, 36-44 hotbar, 45 offhand. Used to ask what the bot is
+     * carrying while no container is open - worn armour deliberately doesn't count.
+     */
+    private static final int INVENTORY_MENU_MAIN_START = 9;
+
     private static final List<DataComponentType<ItemEnchantments>> ENCHANTMENT_COMPONENTS =
             List.of(DataComponents.ENCHANTMENTS, DataComponents.STORED_ENCHANTMENTS);
 
@@ -178,6 +185,71 @@ public class ChestInteractor {
             }
         }
         return -1;
+    }
+
+    /** The player-side slot index of the first non-empty slot in the open container, or -1. */
+    public int firstNonEmptyPlayerSlot() {
+        LocalPlayer player = client().player;
+        if (player == null || !isOpen()) {
+            return -1;
+        }
+        AbstractContainerMenu menu = player.containerMenu;
+        for (int i = containerSlotCount(); i < menu.slots.size(); i++) {
+            if (!menu.getSlot(i).getItem().isEmpty()) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** The item id held in any slot of the open container, or null if it's empty or out of range. */
+    public String itemAt(int slotIndex) {
+        LocalPlayer player = client().player;
+        if (player == null || !isOpen() || slotIndex < 0 || slotIndex >= player.containerMenu.slots.size()) {
+            return null;
+        }
+        ItemStack stack = player.containerMenu.getSlot(slotIndex).getItem();
+        return stack.isEmpty() ? null : BuiltInRegistries.ITEM.getKey(stack.getItem()).toString();
+    }
+
+    /**
+     * How many separate player-side slots hold this item. Distinct from {@link #countPlayerItems},
+     * which sums the items themselves - the shuffle accounts in whole stacks, since that's the unit
+     * a quick-move actually shifts.
+     */
+    public int countPlayerStacks(String itemId) {
+        LocalPlayer player = client().player;
+        if (player == null || !isOpen()) {
+            return 0;
+        }
+        AbstractContainerMenu menu = player.containerMenu;
+        int stacks = 0;
+        for (int i = containerSlotCount(); i < menu.slots.size(); i++) {
+            ItemStack stack = menu.getSlot(i).getItem();
+            if (!stack.isEmpty() && BuiltInRegistries.ITEM.getKey(stack.getItem()).toString().equals(itemId)) {
+                stacks++;
+            }
+        }
+        return stacks;
+    }
+
+    /**
+     * Whether the bot is holding anything at all, read from its own inventory menu rather than an
+     * open container - the stop button needs to answer this with nothing open.
+     */
+    public boolean hasCarriedItems() {
+        LocalPlayer player = client().player;
+        if (player == null) {
+            return false;
+        }
+        AbstractContainerMenu menu = player.inventoryMenu;
+        int end = Math.min(menu.slots.size(), INVENTORY_MENU_MAIN_START + PLAYER_INVENTORY_SLOTS);
+        for (int i = INVENTORY_MENU_MAIN_START; i < end; i++) {
+            if (!menu.getSlot(i).getItem().isEmpty()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
