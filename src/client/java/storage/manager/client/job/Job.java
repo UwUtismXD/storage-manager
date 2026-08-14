@@ -3,7 +3,7 @@ package storage.manager.client.job;
 import net.minecraft.core.BlockPos;
 
 public class Job {
-    public enum Type { SCAN_REGION, SORT_INPUT, SORT_INPUT_RANDOM, WITHDRAW, RANDOMIZE, WITHDRAW_SLOT, DUMP_INVENTORY }
+    public enum Type { SCAN_REGION, SORT_INPUT, SORT_INPUT_RANDOM, WITHDRAW, RANDOMIZE, EXPERIMENTAL_RANDOMIZE, WITHDRAW_SLOT, DUMP_INVENTORY }
 
     public final Type type;
     public final String itemId;
@@ -63,6 +63,11 @@ public class Job {
         return new Job(Type.RANDOMIZE, null, 0);
     }
 
+    /** Builds a complete random target layout before moving anything. */
+    public static Job experimentalRandomize() {
+        return new Job(Type.EXPERIMENTAL_RANDOMIZE, null, 0);
+    }
+
     /**
      * Unloads whatever the bot is carrying into the nearest chest with room. Queued by the stop
      * button rather than the UI directly - stopping mid-job usually leaves items in the inventory,
@@ -88,6 +93,7 @@ public class Job {
             case SORT_INPUT_RANDOM -> "SORT_INPUT (scattered)";
             case WITHDRAW -> "WITHDRAW " + count + "x " + itemId;
             case RANDOMIZE -> "RANDOMIZE";
+            case EXPERIMENTAL_RANDOMIZE -> "EXPERIMENTAL RANDOMIZE";
             case DUMP_INVENTORY -> "DUMP inventory into nearest chest";
             case WITHDRAW_SLOT -> "WITHDRAW " + itemId + " from "
                     + sourceChest.getX() + "," + sourceChest.getY() + "," + sourceChest.getZ()

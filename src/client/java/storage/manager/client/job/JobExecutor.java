@@ -42,7 +42,7 @@ public class JobExecutor {
 
     private enum VisitKind {
         SCAN, WITHDRAW_ITEM, DEPOSIT_ITEM, DEPOSIT_BATCH, READ_INPUT, READ_INPUT_RANDOM,
-        DEPOSIT_TO_OUTPUT, SHUFFLE_CHEST, DUMP_ALL
+        DEPOSIT_TO_OUTPUT, SHUFFLE_CHEST, PLANNED_SHUFFLE, DUMP_ALL
     }
 
     /**
@@ -99,6 +99,9 @@ public class JobExecutor {
      */
     private static final int TARGET_BUFFER_STACKS = 18;
 
+    /** A planned shuffle may need several passes to resolve full-chest transfer cycles. */
+    private static final int MAX_PLANNED_SHUFFLE_PASSES = 12;
+
     /** Assumed capacity of a chest the bot has never opened, for planning deposits into it. */
     private static final int ASSUMED_CHEST_SIZE = 27;
 
@@ -153,6 +156,11 @@ public class JobExecutor {
      * the bot brought along itself - a tool or food in the hotbar isn't cargo.
      */
     private final Map<String, Integer> carried = new LinkedHashMap<>();
+
+    /** Desired stack counts by chest and item for the experimental, pre-planned shuffle. */
+    private final Map<BlockPos, Map<String, Integer>> plannedContents = new LinkedHashMap<>();
+    private int plannedShufflePass;
+    private int plannedShuffleMoves;
 
     /** Set from HTTP handler threads; acted on at the top of the next {@link #tick()}. */
     private volatile boolean stopRequested;
@@ -413,6 +421,7 @@ public class JobExecutor {
                     plan.add(new Visit(pos, VisitKind.SHUFFLE_CHEST));
                 }
             }
+            case EXPERIMENTAL_RANDOMIZE -> buildPlannedShuffle(plan);
             case DUMP_INVENTORY -> {
                 BlockPos target = nearestChestWithRoom(List.of());
                 if (target != null) {
@@ -423,6 +432,49 @@ public class JobExecutor {
             }
         }
         return plan;
+    }
+
+    /**
+     * Makes the experimental shuffle deterministic before the bot touches a chest. Every indexed
+     * occupied slot contributes one entry; shuffling that list and dealing it back into groups the
+     * same size as the original chests preserves total capacity without assuming any chest is
+     * initially empty. Actual transfers are resolved later by {@link #tickPlannedShuffle()}.
+     */
+    private void buildPlannedShuffle(Deque<Visit> plan) {
+        carried.clear();
+        plannedContents.clear();
+        plannedShufflePass = 1;
+        plannedShuffleMoves = 0;
+
+        Set<BlockPos> reserved = reservedChests();
+        List<StorageIndex.ChestEntry> chests = new ArrayList<>();
+        List<String> stacks = new ArrayList<>();
+        for (StorageIndex.ChestEntry chest : index.allChests()) {
+            BlockPos pos = chest.pos.toBlockPos();
+            if (reserved.contains(pos)) {
+                continue;
+            }
+            chests.add(chest);
+            for (StorageIndex.SlotEntry slot : chest.slots) {
+                stacks.add(slot.item);
+            }
+        }
+        if (chests.isEmpty()) {
+            warn("No indexed storage chests to randomize - rescan the region first");
+            return;
+        }
+        Collections.shuffle(stacks);
+        int offset = 0;
+        for (StorageIndex.ChestEntry chest : chests) {
+            Map<String, Integer> target = new HashMap<>();
+            for (int i = 0; i < chest.slots.size(); i++) {
+                target.merge(stacks.get(offset++), 1, Integer::sum);
+            }
+            plannedContents.put(chest.pos.toBlockPos(), target);
+        }
+        for (BlockPos pos : nearestFirst(new ArrayList<>(plannedContents.keySet()), playerPos())) {
+            plan.add(new Visit(pos, VisitKind.PLANNED_SHUFFLE));
+        }
     }
 
     /**
@@ -695,6 +747,7 @@ public class JobExecutor {
             case DEPOSIT_ITEM -> tickDepositItem();
             case DEPOSIT_BATCH -> tickDepositBatch();
             case SHUFFLE_CHEST -> tickShuffleChest();
+            case PLANNED_SHUFFLE -> tickPlannedShuffle();
             case DUMP_ALL -> tickDumpAll();
             case DEPOSIT_TO_OUTPUT -> {
                 int slot = interactor.findPlayerSlotWithItem(currentVisit.item());
@@ -813,6 +866,73 @@ public class JobExecutor {
     }
 
     private ShuffleState shuffle;
+
+    /** Moves this chest one step toward its already-chosen experimental target contents. */
+    private void tickPlannedShuffle() {
+        Map<String, Integer> target = plannedContents.get(currentVisit.pos());
+        if (target == null) {
+            recordSnapshot(currentVisit.pos());
+            finishVisit();
+            return;
+        }
+
+        int moves = 0;
+        Map<String, Integer> current = containerItemCounts();
+        // First make room for cargo that is specifically meant to end up in this chest.
+        for (Map.Entry<String, Integer> entry : target.entrySet()) {
+            String item = entry.getKey();
+            while (moves < MOVES_PER_TICK
+                    && current.getOrDefault(item, 0) < entry.getValue()
+                    && carried.getOrDefault(item, 0) > 0) {
+                int slot = interactor.findPlayerSlotWithItem(item);
+                if (slot < 0) {
+                    dropCarried(item);
+                    break;
+                }
+                int before = interactor.countPlayerItems(item);
+                interactor.quickMove(slot);
+                if (interactor.countPlayerItems(item) == before) {
+                    break; // no room after all
+                }
+                dropCarried(item);
+                current.merge(item, 1, Integer::sum);
+                moves++;
+            }
+        }
+
+        // Then pull only stacks this chest has in excess of its target. This preserves stacks
+        // that already happen to belong here, rather than pointlessly moving them twice.
+        for (StorageIndex.SlotEntry entry : interactor.snapshotContainerSlots()) {
+            if (moves >= MOVES_PER_TICK) {
+                break;
+            }
+            if (current.getOrDefault(entry.item, 0) <= target.getOrDefault(entry.item, 0)) {
+                continue;
+            }
+            int before = interactor.countPlayerItems(entry.item);
+            interactor.quickMove(entry.slot);
+            if (interactor.countPlayerItems(entry.item) == before) {
+                break; // player inventory is full
+            }
+            current.merge(entry.item, -1, Integer::sum);
+            carried.merge(entry.item, 1, Integer::sum);
+            moves++;
+        }
+        plannedShuffleMoves += moves;
+        if (moves >= MOVES_PER_TICK && phaseTicks <= ACTING_TIMEOUT_TICKS) {
+            return;
+        }
+        recordSnapshot(currentVisit.pos());
+        finishVisit();
+    }
+
+    private Map<String, Integer> containerItemCounts() {
+        Map<String, Integer> counts = new HashMap<>();
+        for (StorageIndex.SlotEntry entry : interactor.snapshotContainerSlots()) {
+            counts.merge(entry.item, 1, Integer::sum);
+        }
+        return counts;
+    }
 
     /**
      * One chest's worth of a RANDOMIZE pass: unload part of what the bot is carrying into this
@@ -1151,8 +1271,61 @@ public class JobExecutor {
 
     private void nextVisitOrFinish() {
         if (!advanceVisit()) {
+            if (currentJob != null && currentJob.type == Job.Type.EXPERIMENTAL_RANDOMIZE
+                    && continuePlannedShuffle()) {
+                return;
+            }
             finishJob();
         }
+    }
+
+    /** Starts another reconciliation pass when the fixed experimental layout is not there yet. */
+    private boolean continuePlannedShuffle() {
+        if (plannedShuffleComplete()) {
+            plannedContents.clear();
+            return false;
+        }
+        if (plannedShufflePass >= MAX_PLANNED_SHUFFLE_PASSES || plannedShuffleMoves == 0) {
+            warn("Experimental shuffle could not finish its planned layout; {} cargo stack(s) will be dumped safely",
+                    carriedStacks());
+            plannedContents.clear();
+            if (!carried.isEmpty()) {
+                queue.enqueue(Job.dumpInventory());
+            }
+            return false;
+        }
+        plannedShufflePass++;
+        plannedShuffleMoves = 0;
+        plan = new ArrayDeque<>();
+        for (BlockPos pos : nearestFirst(new ArrayList<>(plannedContents.keySet()), playerPos())) {
+            plan.add(new Visit(pos, VisitKind.PLANNED_SHUFFLE));
+        }
+        return advanceVisit();
+    }
+
+    private boolean plannedShuffleComplete() {
+        if (!carried.isEmpty()) {
+            return false;
+        }
+        Map<BlockPos, StorageIndex.ChestEntry> indexed = new HashMap<>();
+        for (StorageIndex.ChestEntry chest : index.allChests()) {
+            indexed.put(chest.pos.toBlockPos(), chest);
+        }
+        for (Map.Entry<BlockPos, Map<String, Integer>> entry : plannedContents.entrySet()) {
+            StorageIndex.ChestEntry chest = indexed.get(entry.getKey());
+            if (chest == null || !itemCounts(chest.slots).equals(entry.getValue())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static Map<String, Integer> itemCounts(List<StorageIndex.SlotEntry> slots) {
+        Map<String, Integer> counts = new HashMap<>();
+        for (StorageIndex.SlotEntry slot : slots) {
+            counts.merge(slot.item, 1, Integer::sum);
+        }
+        return counts;
     }
 
     private void finishJob() {
@@ -1160,6 +1333,7 @@ public class JobExecutor {
         plan = null;
         currentVisit = null;
         shuffle = null;
+        plannedContents.clear();
         // Index writes are debounced, but a just-finished job is a natural point to persist at
         // rather than leaving the last few chests riding on the background flush.
         index.flush();

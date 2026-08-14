@@ -277,6 +277,14 @@ public class StorageIndex {
         }
     }
 
+    /** Removes the cached chest/content records but deliberately retains the user's setup coordinates. */
+    public synchronized void clearChests() {
+        if (!chests.isEmpty()) {
+            chests.clear();
+            markDirty();
+        }
+    }
+
     public synchronized void registerEmptyChest(BlockPos pos, String type) {
         String key = new Pos(pos).key();
         if (!chests.containsKey(key)) {

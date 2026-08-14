@@ -62,8 +62,10 @@ public class WebServer {
             server.createContext("/api/status", this::handleStatus);
             server.createContext("/api/withdraw", this::handleWithdraw);
             server.createContext("/api/scan", this::handleScan);
+            server.createContext("/api/chests/clear", this::handleClearChests);
             server.createContext("/api/sort", this::handleSort);
             server.createContext("/api/randomize", this::handleRandomize);
+            server.createContext("/api/randomize-experimental", this::handleExperimentalRandomize);
             server.createContext("/api/stop", this::handleStop);
             server.createContext("/api/wander", this::handleWander);
             server.createContext("/api/texture", this::handleTexture);
@@ -200,6 +202,25 @@ public class WebServer {
             return;
         }
         queue.enqueue(Job.randomize());
+        sendJson(exchange, 200, Map.of("ok", true));
+    }
+
+    /** Clears stale chest records after the room was rebuilt; setup coordinates remain intact. */
+    private void handleClearChests(HttpExchange exchange) throws IOException {
+        if (!"POST".equals(exchange.getRequestMethod())) {
+            exchange.sendResponseHeaders(405, -1);
+            return;
+        }
+        index.clearChests();
+        sendJson(exchange, 200, Map.of("ok", true));
+    }
+
+    private void handleExperimentalRandomize(HttpExchange exchange) throws IOException {
+        if (!"POST".equals(exchange.getRequestMethod())) {
+            exchange.sendResponseHeaders(405, -1);
+            return;
+        }
+        queue.enqueue(Job.experimentalRandomize());
         sendJson(exchange, 200, Map.of("ok", true));
     }
 

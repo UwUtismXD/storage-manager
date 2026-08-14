@@ -59,6 +59,8 @@ Then:
 - **Rescan storage** visits every known chest. **Quick rescan** still discovers newly placed
   chests but only reopens ones not seen in the last 15 minutes, which is much faster on a large
   room.
+- **Clear indexed chests** removes cached chest locations and contents after rebuilding the room;
+  it keeps the configured region and input/output coordinates. Run a rescan afterwards.
 - **Sort input chest** empties the input chest, grouping each item into a chest that already
   holds some. **Scatter input chest** instead sends one stack per random chest, so no single
   chest ends up holding all of anything.
@@ -66,6 +68,9 @@ Then:
   each chest once, in random order, unloading part of what it's carrying into that chest and
   picking up what was already there - so every stack moves exactly once and the pass costs one
   visit per chest rather than one per stack. No undo.
+- **Experimental randomize** first assigns every indexed stack to a random, capacity-preserving
+  destination chest, then works through that fixed layout. It can revisit chests while resolving
+  transfer cycles, so rescan immediately before using it and expect it to be slower.
 - **Stop** cancels the running job and everything queued behind it. Anything the bot is still
   carrying goes into the nearest chest with room, so a half-finished shuffle doesn't leave items
   riding around in its inventory.

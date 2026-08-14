@@ -102,6 +102,8 @@
         <button class="secondary" onclick="post('/api/sort', { random: true })"
                 title="Empties the input chest one stack per random chest, so no single chest holds all of anything">Scatter input chest</button>
         <button class="secondary" onclick="randomize()">Randomize storage</button>
+        <button class="secondary" onclick="experimentalRandomize()"
+                title="Builds the complete target distribution before moving stacks; experimental and slower">Experimental randomize</button>
         <button class="danger" onclick="post('/api/stop')"
                 title="Cancels the running job and the whole queue, then puts anything the bot is carrying into the nearest chest with room">Stop</button>
       </div>
@@ -137,6 +139,8 @@
         <div><input type="number" id="outZ" placeholder="z"></div>
       </div>
       <button class="secondary" onclick="saveSetup()">Save setup</button>
+      <button class="danger" onclick="clearChestIndex()"
+              title="Removes cached chest locations and contents but keeps this setup">Clear indexed chests</button>
     </div>
     </div>
 
@@ -192,6 +196,11 @@ async function randomize() {
   await post('/api/randomize');
 }
 
+async function experimentalRandomize() {
+  if (!confirm('Experimental: build a complete random storage plan from the current index, then execute it. Rescan first, and expect extra chest visits. Continue?')) return;
+  await post('/api/randomize-experimental');
+}
+
 function num(id) {
   const v = document.getElementById(id).value;
   return v === '' ? 0 : parseInt(v, 10);
@@ -206,6 +215,12 @@ async function saveSetup() {
     inputChest: { x: num('inX'), y: num('inY'), z: num('inZ') },
     outputChest: { x: num('outX'), y: num('outY'), z: num('outZ') }
   });
+}
+
+async function clearChestIndex() {
+  if (!confirm('Remove every cached chest and its contents? Your region, input, and output settings will be kept. Run a rescan afterwards.')) return;
+  await post('/api/chests/clear');
+  await refreshInventory();
 }
 
 // Built with DOM calls rather than an innerHTML template so item ids - which end up in both
