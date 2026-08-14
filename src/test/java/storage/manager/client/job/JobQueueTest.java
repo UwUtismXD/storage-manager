@@ -53,7 +53,8 @@ class JobQueueTest {
     @Test
     void snapshotIsIndependentCopy() {
         JobQueue q = new JobQueue();
-        q.enqueue(Job.sortInput());
+        Job enqueued = Job.sortInput();
+        q.enqueue(enqueued);
         List<Job> snap = q.snapshot();
         assertEquals(1, snap.size());
         // Mutating the returned list must not touch the live queue - the web UI consumes
@@ -61,7 +62,10 @@ class JobQueueTest {
         // would race on every render.
         snap.clear();
         assertEquals(1, q.size());
-        assertSame(Job.sortInput(), q.poll());
+        // Hold the reference: Job.sortInput() always allocates a fresh instance, so
+        // assertSame against a second call would fail on identity even though the queue
+        // is behaving correctly.
+        assertSame(enqueued, q.poll());
     }
 
     @Test
