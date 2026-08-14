@@ -353,7 +353,7 @@ function renderSidebar() {
   const resolved = setup.resolved || {};
   renderSidePanel('outputPanel', findChest(resolved.output, setup.outputChest),
     'Output chest', setup.outputChest, requestHtml());
-  renderSidePanel('inputPanel', findChest(resolved.input, setup.input),
+  renderSidePanel('inputPanel', findChest(resolved.input, setup.inputChest),
     'Input chest', setup.inputChest, null);
 }
 
