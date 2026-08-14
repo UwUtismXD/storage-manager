@@ -36,6 +36,19 @@ dependencies {
     // Any, which would otherwise resolve the type parameter to Any and fail to convert.
     val baritoneJar: String = sc.properties["mod.baritone_jar"]
     modCompileOnly(files(rootProject.file(baritoneJar)))
+
+    // Tier 1 (pure logic) + tier 2 (test doubles) JUnit 5 tests. Tier 3 would need live minecraft.
+    testImplementation(platform("org.junit:junit-bom:5.11.4"))
+    testImplementation("org.junit.jupiter:junit-jupiter")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+}
+
+tasks.test {
+    useJUnitPlatform()
+    testLogging {
+        events("passed", "failed", "skipped")
+        showStandardStreams = false
+    }
 }
 
 loom {
