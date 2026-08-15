@@ -24,6 +24,7 @@ import java.util.Comparator;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -80,8 +81,6 @@ public class JobExecutor {
     private static final long PATH_TIMEOUT_TICKS = 20L * 60;   // 60s
     private static final long OPEN_TIMEOUT_TICKS = 20L * 5;    // 5s
     private static final long ACTING_TIMEOUT_TICKS = 20L * 10; // 10s - guards the multi-tick loops
-    /** Upper bound on quick-moves in one deposit visit - the bot can't carry more than this. */
-    private static final int MAX_DEPOSITS_PER_VISIT = 36;
 
     /**
      * Quick-moves issued per tick by the visits that keep going across ticks (SHUFFLE_CHEST,
@@ -769,11 +768,20 @@ public class JobExecutor {
         }
     }
 
-    /** Unloads every stack of one item into this chest - the consolidating half of a sort. */
+    /**
+     * Unloads every stack of one item into this chest - the consolidating half of a sort. Capped
+     * to {@link #MOVES_PER_TICK} quick-moves per call so a multi-stack drop spreads across several
+     * ticks instead of firing in a single packet burst (the same rationale that already drives
+     * {@link #tickShuffleChest()}, {@link #tickPlannedShuffle()} and {@link #tickDumpAll()}). When
+     * the cap is hit with more stacks still in the inventory, the container is left open and the
+     * visit is resumed on the next tick; only the chest-full branch finishes immediately so the
+     * next chest can be opened.
+     */
     private void tickDepositItem() {
         String itemId = currentVisit.item();
         boolean chestFull = false;
-        for (int move = 0; move < MAX_DEPOSITS_PER_VISIT; move++) {
+        int moves = 0;
+        for (int move = 0; move < MOVES_PER_TICK; move++) {
             int before = interactor.countPlayerItems(itemId);
             if (before == 0) {
                 break;
@@ -791,18 +799,31 @@ public class JobExecutor {
                 chestFull = true;
                 break;
             }
+            moves++;
         }
-        if (chestFull && interactor.countPlayerItems(itemId) > 0) {
-            List<BlockPos> tried = new ArrayList<>(currentVisit.triedChests());
-            tried.add(currentVisit.pos());
-            BlockPos next = index.depositCandidates(itemId, reservedChests()).stream()
-                    .filter(p -> !tried.contains(p))
-                    .findFirst().orElse(null);
-            if (next != null) {
-                plan.addFirst(new Visit(next, VisitKind.DEPOSIT_ITEM, List.of(itemId), tried));
-            } else {
-                warn("No chest had room for {}, leaving it in the bot's inventory", itemId);
+        boolean stillHolding = interactor.countPlayerItems(itemId) > 0;
+        if (chestFull) {
+            if (stillHolding) {
+                List<BlockPos> tried = new ArrayList<>(currentVisit.triedChests());
+                tried.add(currentVisit.pos());
+                BlockPos next = index.depositCandidates(itemId, reservedChests()).stream()
+                        .filter(p -> !tried.contains(p))
+                        .findFirst().orElse(null);
+                if (next != null) {
+                    plan.addFirst(new Visit(next, VisitKind.DEPOSIT_ITEM, List.of(itemId), tried));
+                } else {
+                    warn("No chest had room for {}, leaving it in the bot's inventory", itemId);
+                }
             }
+            recordSnapshot(currentVisit.pos());
+            finishVisit();
+            return;
+        }
+        if (stillHolding && moves >= MOVES_PER_TICK && phaseTicks <= ACTING_TIMEOUT_TICKS) {
+            // Hit the per-tick cap with more stacks still here - leave the container open and
+            // resume on the next tick, matching the return-early path used by tickShuffleChest
+            // and tickDumpAll for the same reason.
+            return;
         }
         recordSnapshot(currentVisit.pos());
         finishVisit();
@@ -813,6 +834,12 @@ public class JobExecutor {
      * scattered deposit affordable: the point of scattering is that no chest ends up holding all
      * of any one item, which says nothing about how many <em>different</em> items may share a
      * chest - so there's no reason to make a separate trip per stack.
+     *
+     * <p>Capped to {@link #MOVES_PER_TICK} successful quick-moves per call so a large batch
+     * doesn't fire all its packets in one client tick. Items the bot actually deposited (or which
+     * the chest turned out to be full for) are dropped from {@code currentVisit.items()} via the
+     * iterator, so the next tick picks up wherever this one stopped without re-depositing the same
+     * stacks or losing the rest of the batch.
      */
     private void tickDepositBatch() {
         // Whether this chest may hold a given item was settled when the batch was assembled - a
@@ -820,25 +847,36 @@ public class JobExecutor {
         // Re-testing it here would only override the drain's deliberate last-resort doubling up.
         int room = interactor.containerSlotCount() - interactor.snapshotContainerSlots().size();
         List<String> leftovers = new ArrayList<>();
-        for (String item : currentVisit.items()) {
+        Iterator<String> it = currentVisit.items().iterator();
+        int moves = 0;
+        while (it.hasNext()) {
+            if (moves >= MOVES_PER_TICK) {
+                break; // hit the per-tick cap; remaining items stay queued for the next tick
+            }
+            String item = it.next();
             if (room <= 0) {
                 leftovers.add(item);
+                it.remove();
                 continue;
             }
             int slot = interactor.findPlayerSlotWithItem(item);
             if (slot < 0) {
                 dropCarried(item); // gone from the inventory - nothing to place
+                it.remove();
                 continue;
             }
             int before = interactor.countPlayerItems(item);
             interactor.quickMove(slot);
             if (interactor.countPlayerItems(item) == before) {
                 leftovers.add(item);
+                it.remove();
                 room = 0; // full, whatever the index thought
                 continue;
             }
             dropCarried(item);
+            it.remove();
             room--;
+            moves++;
         }
         if (!leftovers.isEmpty()) {
             List<BlockPos> tried = new ArrayList<>(currentVisit.triedChests());
@@ -850,6 +888,13 @@ public class JobExecutor {
                 warn("No chest had room for {} stack(s), leaving them in the bot's inventory",
                         leftovers.size());
             }
+        }
+        if (!currentVisit.items().isEmpty()
+                && moves >= MOVES_PER_TICK
+                && phaseTicks <= ACTING_TIMEOUT_TICKS) {
+            // Hit the per-tick cap with items still queued for this chest - leave the container
+            // open and resume on the next tick, the same way tickShuffleChest / tickDumpAll do.
+            return;
         }
         recordSnapshot(currentVisit.pos());
         finishVisit();
@@ -1186,7 +1231,10 @@ public class JobExecutor {
             taken++;
             if (scatter) {
                 // One stack per chest is the point here, so each gets a batch of exactly one.
-                plan.add(new Visit(scatterTargets.poll(), VisitKind.DEPOSIT_BATCH, entry.item));
+                // The list has to be mutable so tickDepositBatch can drop processed items from
+                // it via its iterator if the visit ever spans more than MOVES_PER_TICK ticks.
+                plan.add(new Visit(scatterTargets.poll(), VisitKind.DEPOSIT_BATCH,
+                        new ArrayList<>(List.of(entry.item)), List.of()));
             } else {
                 takenItems.add(entry.item);
             }
