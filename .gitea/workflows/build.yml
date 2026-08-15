@@ -8,6 +8,15 @@
 name: build
 on: [push, pull_request]
 
+# ACTIONS_RESULTS_URL must point at the real Gitea because the runner defaults it
+# to its own (unreachable) cache server. actions/cache@v4 hits the same broken URL,
+# so we just skip the cache step below - the runner keeps ~/.gradle/caches on disk
+# across jobs anyway, so the only cost is some metadata re-resolution per build.
+# Tried routing ACTIONS_CACHE_URL=ACTIONS_RESULTS_URL first; gitea doesn't speak the
+# /twirp/ cache protocol at the base URL either, so that was a no-op.
+env:
+  ACTIONS_RESULTS_URL: http://192.168.8.76:3030/
+
 jobs:
   build:
     # ubuntu-24.04 is the label this instance's runner has actually executed jobs with.
@@ -23,16 +32,10 @@ jobs:
           java-version: '25'
           distribution: 'temurin'
 
-      # Each version downloads and remaps its own Minecraft, so an uncached run pulls
-      # several hundred MB twice. Worth caching even for a repo this small.
-      - name: cache gradle and loom
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle.kts', 'stonecutter.properties.toml', 'gradle/wrapper/gradle-wrapper.properties') }}
-          restore-keys: gradle-${{ runner.os }}-
+      # Cache step intentionally removed - the runner's ACTIONS_CACHE_URL keeps
+      # timing out (5× exponential backoff, ~30s wasted per build) and the runner
+      # already preserves ~/.gradle/caches across jobs since it's a single named
+      # runner. Re-add this when upstream gitea/runner:nightly fixes the cache URL.
 
       - name: make gradle wrapper executable
         run: chmod +x ./gradlew
@@ -48,16 +51,10 @@ jobs:
         run: ./gradlew buildAndCollect --stacktrace
 
       # Pinned to v3: the v4 client throws GHESNotSupportedError against the artifact
-      # backend (ACTIONS_RESULTS_URL points at GHES at 192.168.8.76:3030, which doesn't
-      # speak the v2+ @actions/artifact protocol). The env override below is still
-      # required because gitea/runner:nightly (v3.1.0+6-gdbd9a892) sets ACTIONS_RESULTS_URL
-      # to its own cache server instead of Gitea, so CreateArtifact would otherwise hit a
-      # port that never answers. Drop the override once the runner sets the variable
-      # correctly - ACTIONS_RUNTIME_URL is already right.
+      # backend. ACTIONS_RESULTS_URL is set at the top-level env to point at the real
+      # Gitea instance (the runner overrides it to its own unreachable server by default).
       - name: capture build artifacts
         uses: actions/upload-artifact@v3
-        env:
-          ACTIONS_RESULTS_URL: http://192.168.8.76:3030/
         with:
           name: jars
           path: build/libs/*/*.jar
