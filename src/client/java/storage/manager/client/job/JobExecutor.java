@@ -148,6 +148,13 @@ public class JobExecutor {
     private boolean paused;
     private String lastWarning = "";
 
+    /**
+     * In-flight chunked region discovery for the current SCAN_REGION job. {@code null} when no
+     * scan is running or the most recent one finished; reset by {@link #finishJob()} and
+     * {@link #handleStop()} so an interrupted scan doesn't carry over to the next job.
+     */
+    private RegionScanner currentScanner;
+
     /** Visits completed on the current job, for the progress readout. */
     private int visitsDone;
 
@@ -262,6 +269,26 @@ public class JobExecutor {
             // Real work turned up - abandon any stroll before planning, so Baritone isn't still
             // heading somewhere else when the first visit starts.
             stopWandering();
+            // Spread the region scan across multiple ticks before planning, so a large cuboid
+            // doesn't freeze the tick thread on a single call. Only SCAN_REGION triggers this -
+            // other jobs reuse whatever the index already knows.
+            if (currentJob.type == Job.Type.SCAN_REGION) {
+                if (currentScanner == null) {
+                    StorageIndex.Region region = index.getRegion();
+                    if (region.min != null && region.max != null) {
+                        currentScanner = new RegionScanner(
+                                region.min.toBlockPos(), region.max.toBlockPos(),
+                                index, new MinecraftBlockStateLookup());
+                    }
+                }
+                if (currentScanner != null) {
+                    currentScanner.scanChunk();
+                    if (!currentScanner.isDone()) {
+                        return;
+                    }
+                    currentScanner = null;
+                }
+            }
             plan = buildPlan(currentJob);
             visitsDone = 0;
             if (!advanceVisit()) {
@@ -286,6 +313,7 @@ public class JobExecutor {
         interactor.close();
         stopWandering();
         queue.clear();
+        currentScanner = null;
         currentJob = null;
         plan = null;
         currentVisit = null;
@@ -362,7 +390,8 @@ public class JobExecutor {
         Deque<Visit> plan = new ArrayDeque<>();
         switch (job.type) {
             case SCAN_REGION -> {
-                discoverChestsInRegion();
+                // Discovery already happened in tick() across however many ticks the region
+                // needed; we only plan which discovered chests are worth re-opening.
                 List<BlockPos> targets = new ArrayList<>();
                 for (StorageIndex.ChestEntry chest : index.allChests()) {
                     targets.add(chest.pos.toBlockPos());
@@ -498,34 +527,6 @@ public class JobExecutor {
     private static BlockPos playerPos() {
         LocalPlayer player = Minecraft.getInstance().player;
         return player != null ? player.blockPosition() : BlockPos.ZERO;
-    }
-
-    private void discoverChestsInRegion() {
-        Minecraft client = Minecraft.getInstance();
-        ClientLevel world = client.level;
-        StorageIndex.Region region = index.getRegion();
-        if (world == null || region.min == null || region.max == null) {
-            return;
-        }
-        BlockPos min = region.min.toBlockPos();
-        BlockPos max = region.max.toBlockPos();
-        // getBlockState() on an unloaded/ungenerated position just reads as air client-side,
-        // so chests outside currently-visible chunks are silently skipped rather than crashing -
-        // they're picked up the next time the bot passes near them during a scan.
-        for (BlockPos pos : BlockPos.betweenClosed(min, max)) {
-            BlockState state = world.getBlockState(pos);
-            Block block = state.getBlock();
-            if (block instanceof ChestBlock && state.getValue(ChestBlock.TYPE) == ChestType.RIGHT) {
-                // The other half of a double chest - opening either half opens the same combined
-                // inventory, so only the LEFT/SINGLE half is registered to avoid visiting it twice.
-                // Also purges any stale duplicate entry left over from before this check existed.
-                index.removeChest(pos);
-                continue;
-            }
-            if (block instanceof ChestBlock || block instanceof BarrelBlock || block instanceof ShulkerBoxBlock) {
-                index.registerEmptyChest(pos.immutable(), BuiltInRegistries.BLOCK.getKey(block).toString());
-            }
-        }
     }
 
     /**
@@ -1213,6 +1214,7 @@ public class JobExecutor {
     }
 
     private void finishJob() {
+        currentScanner = null;
         currentJob = null;
         plan = null;
         currentVisit = null;

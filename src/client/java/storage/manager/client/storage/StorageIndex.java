@@ -120,8 +120,18 @@ public class StorageIndex {
     private boolean dirty;
 
     public StorageIndex() {
-        this.file = FabricLoader.getInstance().getConfigDir()
-                .resolve("storage-manager").resolve("storage-index.json");
+        this(FabricLoader.getInstance().getConfigDir()
+                .resolve("storage-manager").resolve("storage-index.json"));
+    }
+
+    /**
+     * Test-friendly constructor - bypasses {@link FabricLoader} so unit tests in other packages
+     * can build an index without a running fabric environment. The index never touches the file
+     * path until {@link #load()} or {@link #flush()} runs, so a throwaway path is fine in tests
+     * that only exercise the in-memory methods.
+     */
+    public StorageIndex(Path file) {
+        this.file = file;
     }
 
     public synchronized void load() {
