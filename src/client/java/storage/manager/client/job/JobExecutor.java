@@ -605,7 +605,20 @@ public class JobExecutor {
         for (StorageIndex.ChestEntry chest : chestsWithRoom(tried)) {
             candidates.add(chest.pos.toBlockPos());
         }
-        return nearestFirst(candidates, playerPos()).stream().findFirst().orElse(null);
+        return nearestSingle(candidates, playerPos());
+    }
+
+    /**
+     * Single nearest neighbour by Euclidean distance - no floor-aware routing, no greedy tour.
+     * Used by {@link #nearestChestWithRoom()} when only the closest chest matters, where building
+     * a floor map and running the full {@link #nearestFirst} tour is wasted work. O(n) instead
+     * of the floor-aware path's O(n&middot;levels) per comparison.
+     */
+    private static BlockPos nearestSingle(List<BlockPos> targets, BlockPos from) {
+        if (targets.isEmpty()) {
+            return null;
+        }
+        return Collections.min(targets, Comparator.comparingDouble(p -> p.distSqr(from)));
     }
 
     /**
@@ -746,7 +759,7 @@ public class JobExecutor {
      * Unloads every stack of one item into this chest - the consolidating half of a sort. Capped
      * to {@link #MOVES_PER_TICK} quick-moves per call so a multi-stack drop spreads across several
      * ticks instead of firing in a single packet burst (the same rationale that already drives
-     * {@link #tickShuffleChest()}, {@link #tickPlannedShuffle()} and {@link #tickDumpAll()}). When
+     * {@link #tickShuffleChest()} and {@link #tickDumpAll()}). When
      * the cap is hit with more stacks still in the inventory, the container is left open and the
      * visit is resumed on the next tick; only the chest-full branch finishes immediately so the
      * next chest can be opened.
