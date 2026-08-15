@@ -96,14 +96,8 @@
       <div id="warningText" class="sub" style="color: var(--danger); display: none;"></div>
       <div class="actions">
         <button onclick="post('/api/scan')">Rescan storage</button>
-        <button class="secondary" onclick="post('/api/scan', { maxAgeSeconds: 900 })"
-                title="Finds newly-placed chests, but only re-opens ones not seen in the last 15 minutes">Quick rescan</button>
         <button onclick="post('/api/sort')">Sort input chest</button>
-        <button class="secondary" onclick="post('/api/sort', { random: true })"
-                title="Empties the input chest one stack per random chest, so no single chest holds all of anything">Scatter input chest</button>
         <button class="secondary" onclick="randomize()">Randomize storage</button>
-        <button class="secondary" onclick="experimentalRandomize()"
-                title="Builds the complete target distribution before moving stacks; experimental and slower">Experimental randomize</button>
         <button class="danger" onclick="post('/api/stop')"
                 title="Cancels the running job and the whole queue, then puts anything the bot is carrying into the nearest chest with room">Stop</button>
       </div>
@@ -194,11 +188,6 @@ async function setWander() {
 async function randomize() {
   if (!confirm('Redistribute every known item into random chests? Stop cancels it partway.')) return;
   await post('/api/randomize');
-}
-
-async function experimentalRandomize() {
-  if (!confirm('Experimental: build a complete random storage plan from the current index, then execute it. Rescan first, and expect extra chest visits. Continue?')) return;
-  await post('/api/randomize-experimental');
 }
 
 function num(id) {

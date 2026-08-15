@@ -30,7 +30,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.TreeMap;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
@@ -42,8 +41,8 @@ import java.util.concurrent.ThreadLocalRandom;
 public class JobExecutor {
 
     private enum VisitKind {
-        SCAN, WITHDRAW_ITEM, DEPOSIT_ITEM, DEPOSIT_BATCH, READ_INPUT, READ_INPUT_RANDOM,
-        DEPOSIT_TO_OUTPUT, SHUFFLE_CHEST, PLANNED_SHUFFLE, DUMP_ALL
+        SCAN, WITHDRAW_ITEM, DEPOSIT_ITEM, DEPOSIT_BATCH, READ_INPUT,
+        DEPOSIT_TO_OUTPUT, SHUFFLE_CHEST, DUMP_ALL
     }
 
     /**
@@ -98,11 +97,14 @@ public class JobExecutor {
      */
     private static final int TARGET_BUFFER_STACKS = 18;
 
-    /** A planned shuffle may need several passes to resolve full-chest transfer cycles. */
-    private static final int MAX_PLANNED_SHUFFLE_PASSES = 12;
-
     /** Assumed capacity of a chest the bot has never opened, for planning deposits into it. */
     private static final int ASSUMED_CHEST_SIZE = 27;
+
+    /** Chest levels within this many blocks vertically share a standing position. */
+    private static final int SAME_FLOOR_GAP = 1;
+
+    /** Walking cost in blocks charged per floor change - the detour to the stairs and back. */
+    private static final double FLOOR_CHANGE_COST = 24.0;
 
     /** Idle-stroll pacing. Randomized between these so it doesn't read as clockwork. */
     private static final long WANDER_MIN_IDLE_TICKS = 20L * 120; // 2min
@@ -155,11 +157,6 @@ public class JobExecutor {
      * the bot brought along itself - a tool or food in the hotbar isn't cargo.
      */
     private final Map<String, Integer> carried = new LinkedHashMap<>();
-
-    /** Desired stack counts by chest and item for the experimental, pre-planned shuffle. */
-    private final Map<BlockPos, Map<String, Integer>> plannedContents = new LinkedHashMap<>();
-    private int plannedShufflePass;
-    private int plannedShuffleMoves;
 
     /** Set from HTTP handler threads; acted on at the top of the next {@link #tick()}. */
     private volatile boolean stopRequested;
@@ -366,28 +363,18 @@ public class JobExecutor {
         switch (job.type) {
             case SCAN_REGION -> {
                 discoverChestsInRegion();
-                // Discovery always runs (it's cheap and finds newly-placed chests); the freshness
-                // bound only decides which chests are worth walking to and opening again.
-                long cutoff = job.maxAgeMillis > 0
-                        ? System.currentTimeMillis() - job.maxAgeMillis
-                        : Long.MAX_VALUE;
                 List<BlockPos> targets = new ArrayList<>();
                 for (StorageIndex.ChestEntry chest : index.allChests()) {
-                    if (chest.lastScanned < cutoff) {
-                        targets.add(chest.pos.toBlockPos());
-                    }
+                    targets.add(chest.pos.toBlockPos());
                 }
-                for (BlockPos pos : scanOrder(targets)) {
+                for (BlockPos pos : nearestFirst(targets, playerPos())) {
                     plan.add(new Visit(pos, VisitKind.SCAN));
                 }
             }
-            case SORT_INPUT, SORT_INPUT_RANDOM -> {
+            case SORT_INPUT -> {
                 BlockPos input = index.getInputChest();
                 if (input != null) {
-                    VisitKind kind = job.type == Job.Type.SORT_INPUT_RANDOM
-                            ? VisitKind.READ_INPUT_RANDOM
-                            : VisitKind.READ_INPUT;
-                    plan.add(new Visit(input, kind));
+                    plan.add(new Visit(input, VisitKind.READ_INPUT));
                 }
             }
             case WITHDRAW -> {
@@ -420,7 +407,6 @@ public class JobExecutor {
                     plan.add(new Visit(pos, VisitKind.SHUFFLE_CHEST));
                 }
             }
-            case EXPERIMENTAL_RANDOMIZE -> buildPlannedShuffle(plan);
             case DUMP_INVENTORY -> {
                 BlockPos target = nearestChestWithRoom(List.of());
                 if (target != null) {
@@ -434,86 +420,74 @@ public class JobExecutor {
     }
 
     /**
-     * Makes the experimental shuffle deterministic before the bot touches a chest. Every indexed
-     * occupied slot contributes one entry; shuffling that list and dealing it back into groups the
-     * same size as the original chests preserves total capacity without assuming any chest is
-     * initially empty. Actual transfers are resolved later by {@link #tickPlannedShuffle()}.
+     * Groups the chest Y levels present into floors, splitting wherever there's a vertical gap
+     * bigger than {@link #SAME_FLOOR_GAP}. Derived from the targets rather than configured, so a
+     * glass divider, a walkway or a change of level is picked up automatically.
      */
-    private void buildPlannedShuffle(Deque<Visit> plan) {
-        carried.clear();
-        plannedContents.clear();
-        plannedShufflePass = 1;
-        plannedShuffleMoves = 0;
+    private static Map<Integer, Integer> floorBands(List<BlockPos> targets) {
+        List<Integer> levels = targets.stream().map(BlockPos::getY).distinct().sorted().toList();
+        Map<Integer, Integer> floorOf = new HashMap<>();
+        int floor = 0;
+        Integer previous = null;
+        for (int y : levels) {
+            if (previous != null && y - previous > SAME_FLOOR_GAP) {
+                floor++;
+            }
+            floorOf.put(y, floor);
+            previous = y;
+        }
+        return floorOf;
+    }
 
-        Set<BlockPos> reserved = reservedChests();
-        List<StorageIndex.ChestEntry> chests = new ArrayList<>();
-        List<String> stacks = new ArrayList<>();
-        for (StorageIndex.ChestEntry chest : index.allChests()) {
-            BlockPos pos = chest.pos.toBlockPos();
-            if (reserved.contains(pos)) {
-                continue;
+    /** The floor a Y sits on, falling back to the closest known level for positions off-grid. */
+    private static int floorAt(int y, Map<Integer, Integer> floorOf) {
+        Integer exact = floorOf.get(y);
+        if (exact != null) {
+            return exact;
+        }
+        int best = 0;
+        int bestDistance = Integer.MAX_VALUE;
+        for (Map.Entry<Integer, Integer> entry : floorOf.entrySet()) {
+            int distance = Math.abs(entry.getKey() - y);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                best = entry.getValue();
             }
-            chests.add(chest);
-            for (StorageIndex.SlotEntry slot : chest.slots) {
-                stacks.add(slot.item);
-            }
         }
-        if (chests.isEmpty()) {
-            warn("No indexed storage chests to randomize - rescan the region first");
-            return;
-        }
-        Collections.shuffle(stacks);
-        int offset = 0;
-        for (StorageIndex.ChestEntry chest : chests) {
-            Map<String, Integer> target = new HashMap<>();
-            for (int i = 0; i < chest.slots.size(); i++) {
-                target.merge(stacks.get(offset++), 1, Integer::sum);
-            }
-            plannedContents.put(chest.pos.toBlockPos(), target);
-        }
-        for (BlockPos pos : nearestFirst(new ArrayList<>(plannedContents.keySet()), playerPos())) {
-            plan.add(new Visit(pos, VisitKind.PLANNED_SHUFFLE));
-        }
+        return best;
     }
 
     /**
-     * Orders scan targets bottom-up: every chest on the lowest Y layer first, then the next layer
-     * up, and so on. Within a layer the bot walks to whichever chest is nearest, continuing from
-     * where the previous layer left off.
-     *
-     * <p>Without this the plan follows the index's insertion order, which comes from
-     * {@link BlockPos#betweenClosed} - that varies X fastest, then Y, then Z, so a tall storage
-     * room gets covered as full-height columns. The bot climbs 20 blocks, drops back down, and
-     * climbs again once per column.
+     * Rough walking cost between two chests. Horizontal distance is what the bot actually walks;
+     * vertical distance within a floor is free, because chests a block or two apart are opened
+     * from the same standing position without moving. Crossing floors is charged heavily - that's
+     * a trip to the stairs, and it's the move that should be made fewest times.
      */
-    private List<BlockPos> scanOrder(List<BlockPos> targets) {
-        Map<Integer, List<BlockPos>> byLayer = new TreeMap<>();
-        for (BlockPos pos : targets) {
-            byLayer.computeIfAbsent(pos.getY(), y -> new ArrayList<>()).add(pos);
-        }
-        List<BlockPos> ordered = new ArrayList<>();
-        BlockPos cursor = playerPos();
-        for (List<BlockPos> layer : byLayer.values()) {
-            List<BlockPos> leg = nearestFirst(layer, cursor);
-            ordered.addAll(leg);
-            if (!leg.isEmpty()) {
-                cursor = leg.getLast();
-            }
-        }
-        return ordered;
+    private static double travelCost(BlockPos from, BlockPos to, Map<Integer, Integer> floorOf) {
+        double dx = from.getX() - to.getX();
+        double dz = from.getZ() - to.getZ();
+        double horizontal = Math.sqrt(dx * dx + dz * dz);
+        int floors = Math.abs(floorAt(from.getY(), floorOf) - floorAt(to.getY(), floorOf));
+        return horizontal + floors * FLOOR_CHANGE_COST;
     }
 
     /**
-     * Greedy nearest-neighbour walking order from {@code from}. Not an optimal tour, but it turns a
-     * handful of deposit stops that would otherwise criss-cross the room into one loop around it.
+     * Greedy nearest-neighbour walking order from {@code from}, costed by {@link #travelCost}
+     * rather than straight-line distance. Not an optimal tour, but it keeps the bot on one floor
+     * until that floor is done, and takes stacked chests together instead of once per level.
      */
     private static List<BlockPos> nearestFirst(List<BlockPos> targets, BlockPos from) {
+        if (targets.size() < 2) {
+            return new ArrayList<>(targets);
+        }
+        Map<Integer, Integer> floors = floorBands(targets);
         List<BlockPos> remaining = new ArrayList<>(targets);
         List<BlockPos> ordered = new ArrayList<>(remaining.size());
         BlockPos cursor = from;
         while (!remaining.isEmpty()) {
             BlockPos anchor = cursor;
-            BlockPos nearest = Collections.min(remaining, Comparator.comparingDouble(p -> p.distSqr(anchor)));
+            BlockPos nearest = Collections.min(remaining,
+                    Comparator.comparingDouble(p -> travelCost(anchor, p, floors)));
             remaining.remove(nearest);
             ordered.add(nearest);
             cursor = nearest;
@@ -746,7 +720,6 @@ public class JobExecutor {
             case DEPOSIT_ITEM -> tickDepositItem();
             case DEPOSIT_BATCH -> tickDepositBatch();
             case SHUFFLE_CHEST -> tickShuffleChest();
-            case PLANNED_SHUFFLE -> tickPlannedShuffle();
             case DUMP_ALL -> tickDumpAll();
             case DEPOSIT_TO_OUTPUT -> {
                 int slot = interactor.findPlayerSlotWithItem(currentVisit.item());
@@ -764,7 +737,7 @@ public class JobExecutor {
                     // Stay in ACTING until no more of this item is left to deposit.
                 }
             }
-            case READ_INPUT, READ_INPUT_RANDOM -> tickReadInput();
+            case READ_INPUT -> tickReadInput();
         }
     }
 
@@ -911,73 +884,6 @@ public class JobExecutor {
     }
 
     private ShuffleState shuffle;
-
-    /** Moves this chest one step toward its already-chosen experimental target contents. */
-    private void tickPlannedShuffle() {
-        Map<String, Integer> target = plannedContents.get(currentVisit.pos());
-        if (target == null) {
-            recordSnapshot(currentVisit.pos());
-            finishVisit();
-            return;
-        }
-
-        int moves = 0;
-        Map<String, Integer> current = containerItemCounts();
-        // First make room for cargo that is specifically meant to end up in this chest.
-        for (Map.Entry<String, Integer> entry : target.entrySet()) {
-            String item = entry.getKey();
-            while (moves < MOVES_PER_TICK
-                    && current.getOrDefault(item, 0) < entry.getValue()
-                    && carried.getOrDefault(item, 0) > 0) {
-                int slot = interactor.findPlayerSlotWithItem(item);
-                if (slot < 0) {
-                    dropCarried(item);
-                    break;
-                }
-                int before = interactor.countPlayerItems(item);
-                interactor.quickMove(slot);
-                if (interactor.countPlayerItems(item) == before) {
-                    break; // no room after all
-                }
-                dropCarried(item);
-                current.merge(item, 1, Integer::sum);
-                moves++;
-            }
-        }
-
-        // Then pull only stacks this chest has in excess of its target. This preserves stacks
-        // that already happen to belong here, rather than pointlessly moving them twice.
-        for (StorageIndex.SlotEntry entry : interactor.snapshotContainerSlots()) {
-            if (moves >= MOVES_PER_TICK) {
-                break;
-            }
-            if (current.getOrDefault(entry.item, 0) <= target.getOrDefault(entry.item, 0)) {
-                continue;
-            }
-            int before = interactor.countPlayerItems(entry.item);
-            interactor.quickMove(entry.slot);
-            if (interactor.countPlayerItems(entry.item) == before) {
-                break; // player inventory is full
-            }
-            current.merge(entry.item, -1, Integer::sum);
-            carried.merge(entry.item, 1, Integer::sum);
-            moves++;
-        }
-        plannedShuffleMoves += moves;
-        if (moves >= MOVES_PER_TICK && phaseTicks <= ACTING_TIMEOUT_TICKS) {
-            return;
-        }
-        recordSnapshot(currentVisit.pos());
-        finishVisit();
-    }
-
-    private Map<String, Integer> containerItemCounts() {
-        Map<String, Integer> counts = new HashMap<>();
-        for (StorageIndex.SlotEntry entry : interactor.snapshotContainerSlots()) {
-            counts.merge(entry.item, 1, Integer::sum);
-        }
-        return counts;
-    }
 
     /**
      * One chest's worth of a RANDOMIZE pass: unload part of what the bot is carrying into this
@@ -1193,19 +1099,11 @@ public class JobExecutor {
         finishVisit();
     }
 
-    /** Empties the input chest, either consolidating each item or scattering stack by stack. */
+    /** Empties the input chest, consolidating each item into a chest that already holds some. */
     private void tickReadInput() {
-        // Scattering sends each stack to its own random chest, so nothing becomes the one
-        // chest holding all the diamonds. Sorting instead consolidates each item together.
-        boolean scatter = currentVisit.kind() == VisitKind.READ_INPUT_RANDOM;
         List<StorageIndex.SlotEntry> contents = interactor.snapshotContainerSlots();
         int capacity = interactor.countFreePlayerSlots();
         Set<BlockPos> reserved = reservedChests();
-        // Shuffled once and drawn from in order, so no two stacks in this pass land in the
-        // same chest - picking a fresh random chest per stack could hand out duplicates.
-        Deque<BlockPos> scatterTargets = scatter
-                ? new ArrayDeque<>(index.randomStorageChests(reserved))
-                : new ArrayDeque<>();
         Set<String> takenItems = new LinkedHashSet<>();
         boolean outOfSpace = false;
         int taken = 0;
@@ -1220,8 +1118,7 @@ public class JobExecutor {
             // Confirm there's somewhere to put it before pulling it out - with the
             // input/output chests now excluded, a region that hasn't been scanned yet has
             // no candidates at all, and taking it anyway would strand it in the inventory.
-            if (scatter ? scatterTargets.isEmpty()
-                    : index.depositCandidates(entry.item, reserved).isEmpty()) {
+            if (index.depositCandidates(entry.item, reserved).isEmpty()) {
                 warn("No storage chest to sort {} into - rescan the region first", entry.item);
                 break;
             }
@@ -1229,15 +1126,7 @@ public class JobExecutor {
             // reading the snapshot alone never removed anything.
             interactor.quickMove(entry.slot);
             taken++;
-            if (scatter) {
-                // One stack per chest is the point here, so each gets a batch of exactly one.
-                // The list has to be mutable so tickDepositBatch can drop processed items from
-                // it via its iterator if the visit ever spans more than MOVES_PER_TICK ticks.
-                plan.add(new Visit(scatterTargets.poll(), VisitKind.DEPOSIT_BATCH,
-                        new ArrayList<>(List.of(entry.item)), List.of()));
-            } else {
-                takenItems.add(entry.item);
-            }
+            takenItems.add(entry.item);
         }
         // One visit per distinct item, not per stack. DEPOSIT_ITEM now unloads every stack
         // of an item in a single visit, so queueing one per slot just sent the bot to walk
@@ -1253,7 +1142,7 @@ public class JobExecutor {
         // bot that's already full (capacity 0) re-queues SORT_INPUT forever without moving
         // a single item.
         if (outOfSpace && taken > 0) {
-            queue.enqueue(scatter ? Job.sortInputRandom() : Job.sortInput());
+            queue.enqueue(Job.sortInput());
         }
         recordSnapshot(currentVisit.pos());
         finishVisit();
@@ -1319,61 +1208,8 @@ public class JobExecutor {
 
     private void nextVisitOrFinish() {
         if (!advanceVisit()) {
-            if (currentJob != null && currentJob.type == Job.Type.EXPERIMENTAL_RANDOMIZE
-                    && continuePlannedShuffle()) {
-                return;
-            }
             finishJob();
         }
-    }
-
-    /** Starts another reconciliation pass when the fixed experimental layout is not there yet. */
-    private boolean continuePlannedShuffle() {
-        if (plannedShuffleComplete()) {
-            plannedContents.clear();
-            return false;
-        }
-        if (plannedShufflePass >= MAX_PLANNED_SHUFFLE_PASSES || plannedShuffleMoves == 0) {
-            warn("Experimental shuffle could not finish its planned layout; {} cargo stack(s) will be dumped safely",
-                    carriedStacks());
-            plannedContents.clear();
-            if (!carried.isEmpty()) {
-                queue.enqueue(Job.dumpInventory());
-            }
-            return false;
-        }
-        plannedShufflePass++;
-        plannedShuffleMoves = 0;
-        plan = new ArrayDeque<>();
-        for (BlockPos pos : nearestFirst(new ArrayList<>(plannedContents.keySet()), playerPos())) {
-            plan.add(new Visit(pos, VisitKind.PLANNED_SHUFFLE));
-        }
-        return advanceVisit();
-    }
-
-    private boolean plannedShuffleComplete() {
-        if (!carried.isEmpty()) {
-            return false;
-        }
-        Map<BlockPos, StorageIndex.ChestEntry> indexed = new HashMap<>();
-        for (StorageIndex.ChestEntry chest : index.allChests()) {
-            indexed.put(chest.pos.toBlockPos(), chest);
-        }
-        for (Map.Entry<BlockPos, Map<String, Integer>> entry : plannedContents.entrySet()) {
-            StorageIndex.ChestEntry chest = indexed.get(entry.getKey());
-            if (chest == null || !itemCounts(chest.slots).equals(entry.getValue())) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private static Map<String, Integer> itemCounts(List<StorageIndex.SlotEntry> slots) {
-        Map<String, Integer> counts = new HashMap<>();
-        for (StorageIndex.SlotEntry slot : slots) {
-            counts.merge(slot.item, 1, Integer::sum);
-        }
-        return counts;
     }
 
     private void finishJob() {
@@ -1381,7 +1217,6 @@ public class JobExecutor {
         plan = null;
         currentVisit = null;
         shuffle = null;
-        plannedContents.clear();
         // Index writes are debounced, but a just-finished job is a natural point to persist at
         // rather than leaving the last few chests riding on the background flush.
         index.flush();

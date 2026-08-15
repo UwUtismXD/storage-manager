@@ -65,7 +65,6 @@ public class WebServer {
             server.createContext("/api/chests/clear", this::handleClearChests);
             server.createContext("/api/sort", this::handleSort);
             server.createContext("/api/randomize", this::handleRandomize);
-            server.createContext("/api/randomize-experimental", this::handleExperimentalRandomize);
             server.createContext("/api/stop", this::handleStop);
             server.createContext("/api/wander", this::handleWander);
             server.createContext("/api/texture", this::handleTexture);
@@ -173,13 +172,7 @@ public class WebServer {
             exchange.sendResponseHeaders(405, -1);
             return;
         }
-        // Optional {maxAgeSeconds}: still discovers newly-placed chests, but only re-opens the ones
-        // not seen that recently. No body (or 0) means re-open everything, as before.
-        JsonObject body = readJson(exchange);
-        long maxAgeSeconds = body != null && body.has("maxAgeSeconds")
-                ? body.get("maxAgeSeconds").getAsLong()
-                : 0L;
-        queue.enqueue(Job.scanRegion(Math.max(0L, maxAgeSeconds) * 1000L));
+        queue.enqueue(Job.scanRegion());
         sendJson(exchange, 200, Map.of("ok", true));
     }
 
@@ -188,11 +181,7 @@ public class WebServer {
             exchange.sendResponseHeaders(405, -1);
             return;
         }
-        // Optional {random:true}: empty the input chest one stack per random chest instead of
-        // grouping each item into a chest that already holds some.
-        JsonObject body = readJson(exchange);
-        boolean random = body != null && body.has("random") && body.get("random").getAsBoolean();
-        queue.enqueue(random ? Job.sortInputRandom() : Job.sortInput());
+        queue.enqueue(Job.sortInput());
         sendJson(exchange, 200, Map.of("ok", true));
     }
 
@@ -212,15 +201,6 @@ public class WebServer {
             return;
         }
         index.clearChests();
-        sendJson(exchange, 200, Map.of("ok", true));
-    }
-
-    private void handleExperimentalRandomize(HttpExchange exchange) throws IOException {
-        if (!"POST".equals(exchange.getRequestMethod())) {
-            exchange.sendResponseHeaders(405, -1);
-            return;
-        }
-        queue.enqueue(Job.experimentalRandomize());
         sendJson(exchange, 200, Map.of("ok", true));
     }
 
