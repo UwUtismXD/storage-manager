@@ -59,15 +59,32 @@ public class WebServer {
     private final Gson gson = new Gson();
     private final JobQueue queue;
     private final StorageIndex index;
-    private final JobExecutor executor;
+    private final ExecutorView executor;
     private final ItemTextures textures;
     private HttpServer server;
 
-    public WebServer(JobQueue queue, StorageIndex index, JobExecutor executor, ItemTextures textures) {
+    public WebServer(JobQueue queue, StorageIndex index, ExecutorView executor, ItemTextures textures) {
         this.queue = queue;
         this.index = index;
         this.executor = executor;
         this.textures = textures;
+    }
+
+    /**
+     * Narrow view of {@link JobExecutor} that {@link WebServer} actually depends on. Splitting
+     * this out means the web tier can be exercised with a fake from a JUnit test (the live
+     * executor pulls world state, which never exists outside the client tick thread) without
+     * standing up a Minecraft environment. {@link JobExecutor} implements it directly.
+     */
+    public interface ExecutorView {
+        /** Resolved input/output chest positions for the UI; lives on the executor because resolving needs world access. */
+        JobExecutor.ReservedChests reservedChestPositions();
+        void requestStop();
+        void setWanderEnabled(boolean enabled);
+        String getStatus();
+        String getLastWarning();
+        boolean isPaused();
+        boolean isWanderEnabled();
     }
 
     public void start(int port, boolean lanAccessible) {
@@ -178,10 +195,12 @@ public class WebServer {
         // The chest view drags a specific slot across, which fetches that exact stack rather than
         // "any of this item" - the plain form omits both and gets the item-wide search.
         if (body.has("chest") && body.has("slot")) {
-            BlockPos chest = readPos(exchange, body.get("chest"), "chest");
-            if (chest == null) {
+            String error = readPos(body.get("chest"), "chest");
+            if (error != null) {
+                sendJson(exchange, 400, Map.of("error", error));
                 return;
             }
+            BlockPos chest = readPosPosition(body.get("chest"));
             queue.enqueue(Job.withdrawSlot(chest, body.get("slot").getAsInt(), item, count));
         } else {
             queue.enqueue(Job.withdraw(item, count));
@@ -314,95 +333,141 @@ public class WebServer {
             sendJson(exchange, 400, Map.of("error", "expected JSON body"));
             return;
         }
-        if (body.has("region")) {
-            // Region is an object holding two named positions; if either half is missing or
-            // malformed we surface the exact path so the user knows which field to fix.
-            BlockPos[] region = readPosPair(exchange, body.get("region"), "region");
-            if (region == null) {
-                return;
-            }
-            index.setRegion(region[0], region[1]);
-        }
-        if (body.has("inputChest")) {
-            BlockPos pos = readPos(exchange, body.get("inputChest"), "inputChest");
-            if (pos == null) {
-                return;
-            }
-            index.setInputChest(pos);
-        }
-        if (body.has("outputChest")) {
-            BlockPos pos = readPos(exchange, body.get("outputChest"), "outputChest");
-            if (pos == null) {
-                return;
-            }
-            index.setOutputChest(pos);
+        SetupResult result = processSetup(body);
+        if (result.error != null) {
+            sendJson(exchange, 400, Map.of("error", result.error));
+            return;
         }
         sendJson(exchange, 200, Map.of("ok", true));
     }
 
     /**
-     * Reads a single {@link BlockPos} from the given JSON element, returning null and sending
-     * a 400 with a targeted message on any of: missing element, JSON null, non-object, or
-     * any of x/y/z missing or non-numeric. The path is dotted for nested shapes - e.g. a wrong
-     * x inside a region comes back as {@code "region.max.x must be an integer"}.
-     *
-     * <p>Callers must return immediately after a null; the response has already been sent.
+     * Outcome of applying a parsed setup body. {@link #error} is non-null when the request
+     * failed validation; the index is unchanged in that case. {@link #status} is always 200 for
+     * the partial-update 200 case so the HTTP layer can branch on it without a separate flag.
      */
-    private BlockPos readPos(HttpExchange exchange, JsonElement element, String path) throws IOException {
+    static final class SetupResult {
+        final int status;
+        final String error;
+
+        static final SetupResult OK = new SetupResult(200, null);
+        static SetupResult fail(String error) {
+            return new SetupResult(400, error);
+        }
+
+        private SetupResult(int status, String error) {
+            this.status = status;
+            this.error = error;
+        }
+    }
+
+    /**
+     * Applies a parsed {@code /api/setup} POST body to the index. Package-private so the tier 3
+     * test can drive it directly with a constructed {@link JsonObject} instead of standing up
+     * the HTTP server and a real {@link HttpExchange}. The HTTP handler delegates here after
+     * parsing the body off the wire.
+     *
+     * <p>Each top-level field is validated independently and only applied on success: a bad
+     * {@code region} must not leave the input/output chest half-applied, and vice versa.
+     */
+    SetupResult processSetup(JsonObject body) {
+        BlockPos[] region = null;
+        BlockPos inputChest = null;
+        BlockPos outputChest = null;
+        if (body.has("region")) {
+            String error = readPosPair(body.get("region"), "region");
+            if (error != null) {
+                return SetupResult.fail(error);
+            }
+            region = readPosPairPositions(body.get("region"));
+        }
+        if (body.has("inputChest")) {
+            String error = readPos(body.get("inputChest"), "inputChest");
+            if (error != null) {
+                return SetupResult.fail(error);
+            }
+            inputChest = readPosPosition(body.get("inputChest"));
+        }
+        if (body.has("outputChest")) {
+            String error = readPos(body.get("outputChest"), "outputChest");
+            if (error != null) {
+                return SetupResult.fail(error);
+            }
+            outputChest = readPosPosition(body.get("outputChest"));
+        }
+        if (region != null) {
+            index.setRegion(region[0], region[1]);
+        }
+        if (inputChest != null) {
+            index.setInputChest(inputChest);
+        }
+        if (outputChest != null) {
+            index.setOutputChest(outputChest);
+        }
+        return SetupResult.OK;
+    }
+
+    /**
+     * Reads a single {@link BlockPos} from the given JSON element, returning a non-null error
+     * string on any of: missing element, JSON null, non-object, or any of x/y/z missing or
+     * non-numeric. The path is dotted for nested shapes - e.g. a wrong x inside a region comes
+     * back as {@code "region.max.x must be an integer"}.
+     */
+    static String readPos(JsonElement element, String path) {
         if (element == null || element.isJsonNull()) {
-            sendJson(exchange, 400, Map.of("error", path + " missing"));
-            return null;
+            return path + " missing";
         }
         if (!element.isJsonObject()) {
-            sendJson(exchange, 400, Map.of("error", path + " must be an object"));
-            return null;
+            return path + " must be an object";
         }
         JsonObject obj = element.getAsJsonObject();
-        int[] coords = new int[3];
         String[] names = {"x", "y", "z"};
         for (int i = 0; i < 3; i++) {
             JsonElement value = obj.get(names[i]);
             if (value == null || value.isJsonNull()) {
-                sendJson(exchange, 400, Map.of("error", path + "." + names[i] + " missing"));
-                return null;
+                return path + "." + names[i] + " missing";
             }
             if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()) {
-                sendJson(exchange, 400, Map.of("error", path + "." + names[i] + " must be an integer"));
-                return null;
-            }
-            try {
-                coords[i] = value.getAsInt();
-            } catch (NumberFormatException e) {
-                sendJson(exchange, 400, Map.of("error", path + "." + names[i] + " must be an integer"));
-                return null;
+                return path + "." + names[i] + " must be an integer";
             }
         }
-        return new BlockPos(coords[0], coords[1], coords[2]);
+        return null;
+    }
+
+    /** {@link #readPos} without the validation - only safe after {@link #readPos} returns null. */
+    static BlockPos readPosPosition(JsonElement element) {
+        JsonObject obj = element.getAsJsonObject();
+        return new BlockPos(obj.get("x").getAsInt(), obj.get("y").getAsInt(), obj.get("z").getAsInt());
     }
 
     /**
      * Reads a named pair of positions (e.g. {@code region.min} / {@code region.max}) from the
-     * given object element. Returns null and sends a 400 if either half is invalid; callers
-     * must return immediately in that case.
+     * given object element. Returns null on success or a non-null error string otherwise.
      */
-    private BlockPos[] readPosPair(HttpExchange exchange, JsonElement element, String path) throws IOException {
+    static String readPosPair(JsonElement element, String path) {
         if (element == null || element.isJsonNull()) {
-            sendJson(exchange, 400, Map.of("error", path + " missing"));
-            return null;
+            return path + " missing";
         }
         if (!element.isJsonObject()) {
-            sendJson(exchange, 400, Map.of("error", path + " must be an object"));
-            return null;
+            return path + " must be an object";
         }
         JsonObject obj = element.getAsJsonObject();
-        BlockPos min = readPos(exchange, obj.get("min"), path + ".min");
-        if (min == null) {
-            return null;
+        String minError = readPos(obj.get("min"), path + ".min");
+        if (minError != null) {
+            return minError;
         }
-        BlockPos max = readPos(exchange, obj.get("max"), path + ".max");
-        if (max == null) {
-            return null;
+        String maxError = readPos(obj.get("max"), path + ".max");
+        if (maxError != null) {
+            return maxError;
         }
+        return null;
+    }
+
+    /** {@link #readPosPair} without the validation - only safe after {@link #readPosPair} returns null. */
+    static BlockPos[] readPosPairPositions(JsonElement element) {
+        JsonObject obj = element.getAsJsonObject();
+        BlockPos min = readPosPosition(obj.get("min"));
+        BlockPos max = readPosPosition(obj.get("max"));
         return new BlockPos[]{min, max};
     }
 

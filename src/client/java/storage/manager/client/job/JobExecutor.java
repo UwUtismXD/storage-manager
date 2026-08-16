@@ -38,7 +38,7 @@ import java.util.concurrent.ThreadLocalRandom;
  * dynamically once it has actually seen what's in the input chest, since that can't be known
  * up front.
  */
-public class JobExecutor {
+public class JobExecutor implements storage.manager.client.web.WebServer.ExecutorView {
 
     private enum VisitKind {
         SCAN, WITHDRAW_ITEM, DEPOSIT_ITEM, DEPOSIT_BATCH, READ_INPUT,
