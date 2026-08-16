@@ -234,9 +234,12 @@ public class JobExecutor {
 
     private void warn(String message, Object... args) {
         StorageManager.LOGGER.warn(message, args);
+        // Use String.replace (literal, all occurrences) rather than replaceFirst, otherwise
+        // messages with more than one `{}` only substitute the first arg - the rest stay literal
+        // in `lastWarning`, which is what the web UI surfaces verbatim.
         String formatted = message;
         for (Object arg : args) {
-            formatted = formatted.replaceFirst("\\{}", java.util.regex.Matcher.quoteReplacement(String.valueOf(arg)));
+            formatted = formatted.replace("{}", String.valueOf(arg));
         }
         lastWarning = formatted;
     }
