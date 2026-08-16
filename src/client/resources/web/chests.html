@@ -423,6 +423,16 @@ async function refresh() {
   const [inv, setupRes] = await Promise.all([fetch('/api/inventory'), fetch('/api/setup')]);
   chests = (await inv.json()).chests || [];
   setup = await setupRes.json();
+  // The auto-refresh fires every 10s. If the user dropped a stack in that window and the
+  // chest has since been removed from the index (clearChests, broken chest, rescan that
+  // dropped it), the request still names a stale (chest, slot) - confirmRequest() would
+  // fire a WITHDRAW_SLOT against a position the bot can no longer find, which makes the
+  // bot walk to a vanished chest and produces a "No container at X anymore" warning
+  // instead of doing what the user asked. Drop the request here so the in-page sidebar
+  // reflects the new reality before the next click.
+  if (request && !chests.some(c => c && c.pos && samePos(c.pos, request.chest))) {
+    request = null;
+  }
   render();
 }
 
