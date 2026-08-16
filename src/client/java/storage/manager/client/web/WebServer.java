@@ -16,6 +16,7 @@ import storage.manager.client.storage.StorageIndex;
 import storage.manager.client.texture.ItemTextures;
 
 import java.io.ByteArrayOutputStream;
+import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -26,6 +27,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
 
 /**
  * Local control surface for the bot: a static single-page UI plus a small JSON API.
@@ -36,6 +38,22 @@ public class WebServer {
 
     /** How long a texture request waits for the client tick thread before giving up and 404ing. */
     private static final long TEXTURE_TIMEOUT_MILLIS = 3000L;
+
+    /**
+     * Cap on a POST body the server will actually read. Every handler expects a tiny JSON payload
+     * (single-digit bytes in practice); 16 KiB is comfortably above the largest legitimate request
+     * and far below anything that would stress the heap. Requests over the cap are rejected without
+     * their body being read.
+     */
+    private static final long MAX_REQUEST_BYTES = 16 * 1024L;
+
+    /**
+     * Worker-pool size for the HTTP server. The web UI is a localhost control surface used by a
+     * single human; a few concurrent handlers are plenty, and the unbounded queue keeps dispatch
+     * non-rejecting under brief spikes. Replaces the previous {@code newCachedThreadPool} which
+     * would grow without limit under a slow client or a misbehaving loop.
+     */
+    private static final int WEB_THREAD_POOL_SIZE = 8;
 
     private final Gson gson = new Gson();
     private final JobQueue queue;
@@ -69,7 +87,7 @@ public class WebServer {
             server.createContext("/api/wander", this::handleWander);
             server.createContext("/api/texture", this::handleTexture);
             server.createContext("/api/setup", this::handleSetup);
-            server.setExecutor(Executors.newCachedThreadPool());
+            server.setExecutor(Executors.newFixedThreadPool(WEB_THREAD_POOL_SIZE, webThreadFactory()));
             server.start();
             StorageManager.LOGGER.info("Storage Manager web UI listening on http://{}:{}", host, port);
         } catch (IOException e) {
@@ -310,10 +328,69 @@ public class WebServer {
     }
 
     private JsonObject readJson(HttpExchange exchange) throws IOException {
-        try (InputStreamReader reader = new InputStreamReader(exchange.getRequestBody(), StandardCharsets.UTF_8)) {
+        // Reject upfront on Content-Length if the client declared one above the cap, so we don't
+        // even allocate a buffer for an oversized body. Chunked requests fall through to the
+        // bounded stream, which throws as soon as the read exceeds MAX_REQUEST_BYTES.
+        String contentLength = exchange.getRequestHeaders().getFirst("Content-Length");
+        if (contentLength != null) {
+            try {
+                if (Long.parseLong(contentLength) > MAX_REQUEST_BYTES) {
+                    return null;
+                }
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        try (InputStreamReader reader = new InputStreamReader(
+                new BoundedInputStream(exchange.getRequestBody(), MAX_REQUEST_BYTES),
+                StandardCharsets.UTF_8)) {
             return gson.fromJson(reader, JsonObject.class);
         } catch (Exception e) {
             return null;
+        }
+    }
+
+    /** Named daemon thread factory so pool workers show up as `storage-manager-web-N` in stack traces. */
+    private static ThreadFactory webThreadFactory() {
+        return runnable -> {
+            Thread thread = new Thread(runnable, "storage-manager-web");
+            thread.setDaemon(true);
+            return thread;
+        };
+    }
+
+    /** {@link InputStream} wrapper that throws once the caller has read more than {@code limit} bytes. */
+    private static final class BoundedInputStream extends FilterInputStream {
+        private long remaining;
+
+        BoundedInputStream(InputStream in, long limit) {
+            super(in);
+            this.remaining = limit;
+        }
+
+        @Override
+        public int read() throws IOException {
+            if (remaining <= 0) {
+                throw new IOException("request body exceeded " + MAX_REQUEST_BYTES + " bytes");
+            }
+            int b = in.read();
+            if (b >= 0) {
+                remaining--;
+            }
+            return b;
+        }
+
+        @Override
+        public int read(byte[] buf, int off, int len) throws IOException {
+            if (remaining <= 0) {
+                throw new IOException("request body exceeded " + MAX_REQUEST_BYTES + " bytes");
+            }
+            int toRead = (int) Math.min(len, remaining);
+            int n = in.read(buf, off, toRead);
+            if (n > 0) {
+                remaining -= n;
+            }
+            return n;
         }
     }
 
