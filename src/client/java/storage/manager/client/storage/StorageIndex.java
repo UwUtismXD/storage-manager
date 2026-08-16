@@ -106,7 +106,10 @@ public class StorageIndex {
     public record Contribution(BlockPos chestPos, int slot, int count) {
     }
 
-    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
+    // Machine-read only - the loader is the only consumer, no one inspects the file by hand.
+    // A vanilla player's index can reach the MB range; pretty-printing adds ~30% whitespace for
+    // no benefit there.
+    private static final Gson GSON = new GsonBuilder().create();
 
     private static final long SAVE_INTERVAL_MILLIS = 5000L;
 

@@ -1,6 +1,7 @@
 package storage.manager.client.web;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
@@ -177,7 +178,10 @@ public class WebServer {
         // The chest view drags a specific slot across, which fetches that exact stack rather than
         // "any of this item" - the plain form omits both and gets the item-wide search.
         if (body.has("chest") && body.has("slot")) {
-            BlockPos chest = readPos(body.getAsJsonObject("chest"));
+            BlockPos chest = readPos(exchange, body.get("chest"), "chest");
+            if (chest == null) {
+                return;
+            }
             queue.enqueue(Job.withdrawSlot(chest, body.get("slot").getAsInt(), item, count));
         } else {
             queue.enqueue(Job.withdraw(item, count));
@@ -311,20 +315,95 @@ public class WebServer {
             return;
         }
         if (body.has("region")) {
-            JsonObject region = body.getAsJsonObject("region");
-            index.setRegion(readPos(region.getAsJsonObject("min")), readPos(region.getAsJsonObject("max")));
+            // Region is an object holding two named positions; if either half is missing or
+            // malformed we surface the exact path so the user knows which field to fix.
+            BlockPos[] region = readPosPair(exchange, body.get("region"), "region");
+            if (region == null) {
+                return;
+            }
+            index.setRegion(region[0], region[1]);
         }
         if (body.has("inputChest")) {
-            index.setInputChest(readPos(body.getAsJsonObject("inputChest")));
+            BlockPos pos = readPos(exchange, body.get("inputChest"), "inputChest");
+            if (pos == null) {
+                return;
+            }
+            index.setInputChest(pos);
         }
         if (body.has("outputChest")) {
-            index.setOutputChest(readPos(body.getAsJsonObject("outputChest")));
+            BlockPos pos = readPos(exchange, body.get("outputChest"), "outputChest");
+            if (pos == null) {
+                return;
+            }
+            index.setOutputChest(pos);
         }
         sendJson(exchange, 200, Map.of("ok", true));
     }
 
-    private static BlockPos readPos(JsonObject obj) {
-        return new BlockPos(obj.get("x").getAsInt(), obj.get("y").getAsInt(), obj.get("z").getAsInt());
+    /**
+     * Reads a single {@link BlockPos} from the given JSON element, returning null and sending
+     * a 400 with a targeted message on any of: missing element, JSON null, non-object, or
+     * any of x/y/z missing or non-numeric. The path is dotted for nested shapes - e.g. a wrong
+     * x inside a region comes back as {@code "region.max.x must be an integer"}.
+     *
+     * <p>Callers must return immediately after a null; the response has already been sent.
+     */
+    private BlockPos readPos(HttpExchange exchange, JsonElement element, String path) throws IOException {
+        if (element == null || element.isJsonNull()) {
+            sendJson(exchange, 400, Map.of("error", path + " missing"));
+            return null;
+        }
+        if (!element.isJsonObject()) {
+            sendJson(exchange, 400, Map.of("error", path + " must be an object"));
+            return null;
+        }
+        JsonObject obj = element.getAsJsonObject();
+        int[] coords = new int[3];
+        String[] names = {"x", "y", "z"};
+        for (int i = 0; i < 3; i++) {
+            JsonElement value = obj.get(names[i]);
+            if (value == null || value.isJsonNull()) {
+                sendJson(exchange, 400, Map.of("error", path + "." + names[i] + " missing"));
+                return null;
+            }
+            if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()) {
+                sendJson(exchange, 400, Map.of("error", path + "." + names[i] + " must be an integer"));
+                return null;
+            }
+            try {
+                coords[i] = value.getAsInt();
+            } catch (NumberFormatException e) {
+                sendJson(exchange, 400, Map.of("error", path + "." + names[i] + " must be an integer"));
+                return null;
+            }
+        }
+        return new BlockPos(coords[0], coords[1], coords[2]);
+    }
+
+    /**
+     * Reads a named pair of positions (e.g. {@code region.min} / {@code region.max}) from the
+     * given object element. Returns null and sends a 400 if either half is invalid; callers
+     * must return immediately in that case.
+     */
+    private BlockPos[] readPosPair(HttpExchange exchange, JsonElement element, String path) throws IOException {
+        if (element == null || element.isJsonNull()) {
+            sendJson(exchange, 400, Map.of("error", path + " missing"));
+            return null;
+        }
+        if (!element.isJsonObject()) {
+            sendJson(exchange, 400, Map.of("error", path + " must be an object"));
+            return null;
+        }
+        JsonObject obj = element.getAsJsonObject();
+        BlockPos min = readPos(exchange, obj.get("min"), path + ".min");
+        if (min == null) {
+            return null;
+        }
+        BlockPos max = readPos(exchange, obj.get("max"), path + ".max");
+        if (max == null) {
+            return null;
+        }
+        return new BlockPos[]{min, max};
     }
 
     private JsonObject readJson(HttpExchange exchange) throws IOException {
