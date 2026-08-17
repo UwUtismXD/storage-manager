@@ -2,11 +2,9 @@
 // can pick it up without extra config. archiveArtifacts globs each version's jar
 // separately (no combined zip).
 //
-// Triggers via the Gitea plugin (installed + active on Jenkins). Requires
-// `Manage Jenkins > System > Gitea servers` to have an entry pointing at
-// http://192.168.8.76:3030 with the `gitea-storage-manager` credentials
-// and "Manage hooks" enabled. Once configured, pushes trigger builds
-// instantly and PRs get ✓/✗ status reported back to Gitea.
+// pollSCM trigger as a placeholder until the Gitea plugin's job-level trigger
+// is wired up. The gitea plugin v282 doesn't ship a pipeline DSL `gitea()`
+// trigger — it goes in the job config XML directly. We'll move it there.
 
 pipeline {
     agent any
@@ -18,7 +16,7 @@ pipeline {
     }
 
     triggers {
-        gitea(events: ['push', 'pull_request'])
+        pollSCM('H/2 * * * *')
     }
 
     stages {
