@@ -2,9 +2,11 @@
 // can pick it up without extra config. archiveArtifacts globs each version's jar
 // separately (no combined zip).
 //
-// Triggers: pollSCM every 2 min until the Gitea plugin is enabled and restarted.
-// Once it is, swap the triggers block for `gitea(events: ['push', 'pull_request'])`
-// to get webhook speed and PR status reporting back to Gitea.
+// Triggers via the Gitea plugin (installed + active on Jenkins). Requires
+// `Manage Jenkins > System > Gitea servers` to have an entry pointing at
+// http://192.168.8.76:3030 with the `gitea-storage-manager` credentials
+// and "Manage hooks" enabled. Once configured, pushes trigger builds
+// instantly and PRs get ✓/✗ status reported back to Gitea.
 
 pipeline {
     agent any
@@ -16,7 +18,7 @@ pipeline {
     }
 
     triggers {
-        pollSCM('H/2 * * * *')
+        gitea(events: ['push', 'pull_request'])
     }
 
     stages {
