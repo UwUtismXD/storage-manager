@@ -33,7 +33,7 @@ pipeline {
                 }
             }
             steps {
-                withCredentials([string(credentialsId: 'gitea-token', variable: 'GITEA_TOKEN')]) {
+                withCredentials([usernamePassword(credentialsId: 'gitea-storage-manager', usernameVariable: 'GITEA_USER', passwordVariable: 'GITEA_TOKEN')]) {
                     sh 'GITEA_URL=http://192.168.8.76:3030 GITEA_REPO=UwUtismXD/storage-manager python3 scripts/release.py'
                 }
             }
