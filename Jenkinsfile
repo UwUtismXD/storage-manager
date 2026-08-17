@@ -25,6 +25,19 @@ pipeline {
                 sh './gradlew buildAndCollect --no-daemon'
             }
         }
+        stage('Release') {
+            // Only on tag builds — git describe --exact-match HEAD succeeds iff HEAD is a tag.
+            when {
+                expression {
+                    sh(script: 'git describe --tags --exact-match HEAD', returnStatus: true) == 0
+                }
+            }
+            steps {
+                withCredentials([string(credentialsId: 'gitea-token', variable: 'GITEA_TOKEN')]) {
+                    sh 'GITEA_URL=http://192.168.8.76:3030 GITEA_REPO=UwUtismXD/storage-manager python3 scripts/release.py'
+                }
+            }
+        }
     }
 
     post {
