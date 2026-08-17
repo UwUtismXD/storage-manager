@@ -23,7 +23,15 @@ GITEA_TOKEN = os.environ["GITEA_TOKEN"]
 
 TAG_NAME = os.environ.get("TAG_NAME") or (sys.argv[1] if len(sys.argv) > 1 else None)
 if not TAG_NAME:
-    sys.exit("TAG_NAME not set (env or argv[1])")
+    # Fall back to git itself — the `when` block in Jenkinsfile already proved
+    # HEAD is exactly on a tag, so this will return something like `v1.2.3`.
+    try:
+        TAG_NAME = subprocess.check_output(
+            ["git", "describe", "--tags", "--exact-match", "HEAD"],
+            text=True, stderr=subprocess.DEVNULL, timeout=10,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        sys.exit("TAG_NAME not set and HEAD is not on a tag")
 
 API = f"{GITEA_URL}/api/v1/repos/{GITEA_REPO}"
 HEADERS = {"Authorization": f"token {GITEA_TOKEN}"}
