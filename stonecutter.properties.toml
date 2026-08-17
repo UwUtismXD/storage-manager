@@ -24,3 +24,12 @@ mod.baritone_id = "baritone-meteor"
 mod.baritone_jar = "jars/baritone-meteor-26.1.jar"
 
 deps.fabric_api = "0.155.2+26.1.2"
+
+["26.2"]
+mod.mc_compat = "~26.2"
+mod.java = "25"
+# Same Meteor fork as 26.1.x, just rebuilt against the 26.2 API surface.
+mod.baritone_id = "baritone-meteor"
+mod.baritone_jar = "jars/baritone-meteor-26.2.jar"
+
+deps.fabric_api = "0.157.0+26.2"

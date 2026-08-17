@@ -18,7 +18,7 @@ plugins {
 
 stonecutter {
     create(rootProject) {
-        versions("1.21.8", "26.1.2")
+        versions("1.21.8", "26.1.2", "26.2")
         // The version the source tree is checked in as - keeps 1.21.8 the one you read in git.
         vcsVersion = "1.21.8"
     }

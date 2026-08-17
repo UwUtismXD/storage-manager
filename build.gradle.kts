@@ -14,7 +14,7 @@ val requiredJava: JavaVersion = when {
 
 repositories {
     // Baritone has no reliable public Maven repo for recent Fabric builds, so the jars are
-    // vendored locally - the 1.21.8 API jar under libs/, Meteor's 26.1 fork under jars/.
+    // vendored locally - the 1.21.8 API jar under libs/, Meteor's 26.x forks under jars/.
     flatDir { dirs(rootProject.file("libs"), rootProject.file("jars")) }
 }
 
