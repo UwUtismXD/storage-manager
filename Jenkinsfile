@@ -2,9 +2,13 @@
 // can pick it up without extra config. archiveArtifacts globs each version's jar
 // separately (no combined zip).
 //
-// pollSCM trigger as a placeholder until the Gitea plugin's job-level trigger
-// is wired up. The gitea plugin v282 doesn't ship a pipeline DSL `gitea()`
-// trigger — it goes in the job config XML directly. We'll move it there.
+// Triggers: two jobs share this Jenkinsfile. Minecraft/storage-manager-master
+// builds only master; Minecraft/storage-manager-tags builds only refs/tags/v*.
+// Gitea webhooks fire each job's build URL directly (no SCM polling, no
+// branch/tag spec ambiguity — that's the bug this split avoids).
+//
+// Release stage is gated on `git describe --exact-match HEAD`, which succeeds
+// only when HEAD is a tag → tag builds publish, master builds skip.
 
 pipeline {
     agent any
@@ -13,10 +17,6 @@ pipeline {
         timestamps()
         // Keep build history tight; per-version jars are archived per-build anyway.
         buildDiscarder(logRotator(numToKeepStr: '20'))
-    }
-
-    triggers {
-        pollSCM('H/2 * * * *')
     }
 
     stages {
