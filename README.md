@@ -81,3 +81,7 @@ you or an external launcher.
 
 Available under the CC0 license. Feel free to learn from it and incorporate it in your own
 projects.
+
+## Build status
+
+Built by Jenkins: `Minecraft/storage-manager-master` (master) and `Minecraft/storage-manager-tags` (refs/tags/v*). Webhook-driven since the 2026-08-25 split.
