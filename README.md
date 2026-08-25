@@ -85,3 +85,5 @@ use, modify, and share — just not sell.
 ## Build status
 
 Built by Jenkins: `Minecraft/storage-manager-master` (master) and `Minecraft/storage-manager-tags` (refs/tags/v*). Webhook-driven since the 2026-08-25 split.
+
+<!-- tested 2026-08-25T16:52:40Z -->
