@@ -79,8 +79,8 @@ you or an external launcher.
 
 ## License
 
-Available under the CC0 license. Feel free to learn from it and incorporate it in your own
-projects.
+Available under the storage-manager license (custom permissive-NC, see LICENSE). Free to
+use, modify, and share — just not sell.
 
 ## Build status
 
