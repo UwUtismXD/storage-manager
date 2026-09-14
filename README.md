@@ -36,6 +36,23 @@ Fabric API is pulled in automatically.
 
 Jars are named `storage-manager-<mod version>+<mc version>.jar`.
 
+## Virtual sorting tests
+
+The client source also contains a pure in-memory sorter under
+`storage.manager.client.simulation`. It models chest capacity, stack merging, input contents,
+positions, chest visits, and walking distance without starting Minecraft or controlling Baritone.
+`VirtualSorter` currently includes `consolidate`, `balanced`, `nearest`, `roundRobin`, and seeded
+`random` strategies. Add another `SortStrategy` to compare a new routing idea against the same
+virtual world. The test suite runs the same simulation for every Stonecutter Minecraft target:
+
+```sh
+./gradlew test
+```
+
+Use a fixed seed when comparing randomized strategies so results are reproducible. The result
+reports stacks moved, chest visits, route distance, used slots, and wasted slots; the returned
+world can also be inspected for its final per-chest contents.
+
 The active version - the one the source tree is currently processed for, and what `runClient`
 launches - is set by `stonecutter active "..."` in `stonecutter.gradle.kts`. Version-specific API
 differences are handled by the replacement rules in that same file rather than by duplicating
