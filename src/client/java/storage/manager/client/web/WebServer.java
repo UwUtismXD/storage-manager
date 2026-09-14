@@ -26,6 +26,7 @@ import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
@@ -77,6 +78,11 @@ public class WebServer {
      * standing up a Minecraft environment. {@link JobExecutor} implements it directly.
      */
     public interface ExecutorView {
+        /** A client-tick-thread snapshot; HTTP handlers must never read the live player directly. */
+        default List<InventorySlot> botInventory() {
+            return List.of();
+        }
+
         /** Resolved input/output chest positions for the UI; lives on the executor because resolving needs world access. */
         JobExecutor.ReservedChests reservedChestPositions();
         void requestStop();
@@ -87,6 +93,9 @@ public class WebServer {
         boolean isWanderEnabled();
     }
 
+    /** JSON-friendly snapshot of one player-inventory slot. Empty slots have a null item. */
+    public record InventorySlot(int slot, String item, int count) {}
+
     public void start(int port, boolean lanAccessible) {
         try {
             String host = lanAccessible ? "0.0.0.0" : "127.0.0.1";
@@ -95,6 +104,7 @@ public class WebServer {
             // Longest-prefix wins in HttpServer, so this takes precedence over "/" for /chests.
             server.createContext("/chests", this::handleChests);
             server.createContext("/api/inventory", this::handleInventory);
+            server.createContext("/api/bot-inventory", this::handleBotInventory);
             server.createContext("/api/status", this::handleStatus);
             server.createContext("/api/withdraw", this::handleWithdraw);
             server.createContext("/api/scan", this::handleScan);
@@ -159,6 +169,14 @@ public class WebServer {
         payload.put("totals", index.totalCounts(executor.reservedChestPositions().positions()));
         payload.put("chests", index.allChests());
         sendJson(exchange, 200, payload);
+    }
+
+    private void handleBotInventory(HttpExchange exchange) throws IOException {
+        if (!"GET".equals(exchange.getRequestMethod())) {
+            exchange.sendResponseHeaders(405, -1);
+            return;
+        }
+        sendJson(exchange, 200, Map.of("slots", executor.botInventory()));
     }
 
     private void handleStatus(HttpExchange exchange) throws IOException {

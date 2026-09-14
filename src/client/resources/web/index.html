@@ -79,6 +79,15 @@
   .withdraw-cell input[type=number] { width: 68px; padding: 4px 6px; font-size: 12px; }
   .withdraw-cell button { padding: 4px 10px; font-size: 12px; }
   .empty-note { color: var(--muted); font-size: 13px; padding: 16px 0; }
+  .bot-slots { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 5px; }
+  .bot-slot {
+    min-height: 48px; padding: 5px; border: 1px solid var(--border); border-radius: 6px;
+    background: #10131a; font-size: 11px; overflow: hidden;
+  }
+  .bot-slot.empty { color: var(--muted); text-align: center; }
+  .bot-slot-item { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bot-slot-count { display: block; color: var(--accent); margin-top: 4px; font-weight: 600; }
+  .live-note { color: var(--muted); font-size: 11px; margin-top: 10px; }
 </style>
 </head>
 <body>
@@ -104,6 +113,12 @@
       <label class="check" title="Every 2-5 minutes with nothing queued, the bot strolls to a random chest instead of standing still">
         <input type="checkbox" id="wander" onchange="setWander()"> Wander around storage when idle
       </label>
+    </div>
+
+    <div class="panel">
+      <h2>Bot inventory</h2>
+      <div id="botInventory" class="bot-slots" aria-live="polite"></div>
+      <div id="botInventoryNote" class="live-note">Waiting for live inventory data...</div>
     </div>
 
     <div class="panel">
@@ -152,6 +167,9 @@
 
 <script>
 let totals = {};
+let liveRefreshInFlight = false;
+let botInventoryAvailable = true;
+let nextBotInventoryRetry = 0;
 
 async function post(path, body) {
   await fetch(path, {
@@ -266,14 +284,58 @@ function renderInventory() {
 }
 
 async function refreshInventory() {
-  const res = await fetch('/api/inventory');
+  const res = await fetch('/api/inventory', { cache: 'no-store' });
   const data = await res.json();
   totals = data.totals || {};
   renderInventory();
 }
 
+function renderBotInventory(slots) {
+  const body = document.getElementById('botInventory');
+  const note = document.getElementById('botInventoryNote');
+  body.innerHTML = '';
+  if (!Array.isArray(slots)) {
+    note.textContent = 'Live bot inventory is not available yet.';
+    return;
+  }
+  for (let i = 0; i < 36; i++) {
+    const slot = slots[i] || null;
+    const cell = document.createElement('div');
+    cell.className = 'bot-slot' + (slot && slot.item ? '' : ' empty');
+    if (slot && slot.item) {
+      const item = document.createElement('span');
+      item.className = 'bot-slot-item';
+      item.textContent = slot.item;
+      item.title = slot.item;
+      const count = document.createElement('span');
+      count.className = 'bot-slot-count';
+      count.textContent = 'x' + (slot.count || 0);
+      cell.append(item, count);
+    } else {
+      cell.textContent = 'empty';
+    }
+    body.appendChild(cell);
+  }
+  note.textContent = 'Live view · updated twice per second';
+}
+
+async function refreshBotInventory() {
+  if (!botInventoryAvailable && Date.now() < nextBotInventoryRetry) return;
+  try {
+    const res = await fetch('/api/bot-inventory', { cache: 'no-store' });
+    if (!res.ok) throw new Error('not available');
+    const data = await res.json();
+    botInventoryAvailable = true;
+    renderBotInventory(data.slots || []);
+  } catch (_) {
+    if (botInventoryAvailable) renderBotInventory(null);
+    botInventoryAvailable = false;
+    nextBotInventoryRetry = Date.now() + 10000;
+  }
+}
+
 async function refreshStatus() {
-  const res = await fetch('/api/status');
+  const res = await fetch('/api/status', { cache: 'no-store' });
   const data = await res.json();
   document.getElementById('statusText').textContent = data.status;
   document.getElementById('statusDot').className = 'dot' + (data.paused ? ' paused' : '');
@@ -287,6 +349,16 @@ async function refreshStatus() {
     warningEl.style.display = 'block';
   } else {
     warningEl.style.display = 'none';
+  }
+}
+
+async function refreshLive() {
+  if (liveRefreshInFlight) return;
+  liveRefreshInFlight = true;
+  try {
+    await Promise.all([refreshStatus(), refreshInventory(), refreshBotInventory()]);
+  } finally {
+    liveRefreshInFlight = false;
   }
 }
 
@@ -310,10 +382,8 @@ async function loadSetup() {
 }
 
 loadSetup();
-refreshInventory();
-refreshStatus();
-setInterval(refreshStatus, 3000);
-setInterval(refreshInventory, 10000);
+refreshLive();
+setInterval(refreshLive, 500);
 </script>
 </body>
 </html>

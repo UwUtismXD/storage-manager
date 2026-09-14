@@ -9,6 +9,7 @@ import net.minecraft.world.level.block.BarrelBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.ChestBlock;
 import net.minecraft.world.level.block.ShulkerBoxBlock;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.ChestType;
 
@@ -16,6 +17,7 @@ import storage.manager.StorageManager;
 import storage.manager.client.baritone.BotNavigator;
 import storage.manager.client.interact.ChestInteractor;
 import storage.manager.client.storage.StorageIndex;
+import storage.manager.client.web.WebServer;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -31,6 +33,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.stream.Collectors;
 
 /**
  * Drains {@link JobQueue} one job at a time on the client tick thread. Each job is expanded
@@ -42,7 +45,7 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
 
     private enum VisitKind {
         SCAN, WITHDRAW_ITEM, DEPOSIT_ITEM, DEPOSIT_BATCH, READ_INPUT,
-        DEPOSIT_TO_OUTPUT, SHUFFLE_CHEST, DUMP_ALL
+        DEPOSIT_TO_OUTPUT, SHUFFLE_CHEST, SHUFFLE_GRAB, SHUFFLE_DROP, DUMP_ALL
     }
 
     /**
@@ -169,6 +172,7 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
     private volatile boolean stopRequested;
 
     private volatile boolean wanderEnabled = true;
+    private volatile List<WebServer.InventorySlot> botInventory = emptyBotInventory();
     private boolean wandering;
     private long idleTicks;
     private long wanderTicks;
@@ -193,6 +197,37 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
 
     public boolean isPaused() {
         return paused;
+    }
+
+    @Override
+    public List<WebServer.InventorySlot> botInventory() {
+        return botInventory;
+    }
+
+    /** Captures all 36 player slots on the client thread for the web server to read safely. */
+    private void refreshBotInventory() {
+        LocalPlayer player = Minecraft.getInstance().player;
+        if (player == null) {
+            botInventory = emptyBotInventory();
+            return;
+        }
+        List<WebServer.InventorySlot> snapshot = new ArrayList<>(36);
+        for (int slot = 0; slot < 36; slot++) {
+            ItemStack stack = player.getInventory().getItem(slot);
+            snapshot.add(stack.isEmpty()
+                    ? new WebServer.InventorySlot(slot, null, 0)
+                    : new WebServer.InventorySlot(slot,
+                            BuiltInRegistries.ITEM.getKey(stack.getItem()).toString(), stack.getCount()));
+        }
+        botInventory = List.copyOf(snapshot);
+    }
+
+    private static List<WebServer.InventorySlot> emptyBotInventory() {
+        List<WebServer.InventorySlot> empty = new ArrayList<>(36);
+        for (int slot = 0; slot < 36; slot++) {
+            empty.add(new WebServer.InventorySlot(slot, null, 0));
+        }
+        return List.copyOf(empty);
     }
 
     /**
@@ -249,6 +284,7 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
     }
 
     public void tick() {
+        refreshBotInventory();
         // Refreshed on a timer rather than only while jobs run, so the chest view can label the
         // input/output chests even when the bot is idle or paused. Costs a couple of block lookups.
         if (++ticksSinceReservedRefresh >= RESERVED_REFRESH_TICKS) {
@@ -321,6 +357,9 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
         plan = null;
         currentVisit = null;
         shuffle = null;
+        randomizeRemaining = null;
+        randomizeBatchDestinations = null;
+        randomizeLeftovers = null;
         carried.clear();
         visitsDone = 0;
         if (!interactor.hasCarriedItems()) {
@@ -431,13 +470,26 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
                 }
             }
             case RANDOMIZE -> {
-                // One visit per storage chest, in random order, and that's the whole plan: each
-                // SHUFFLE_CHEST both unloads part of what the bot is carrying and picks that
-                // chest's own contents up, so a chest is opened once and every stack moves once.
-                carried.clear();
-                for (BlockPos pos : index.randomStorageChests(reservedChests())) {
-                    plan.add(new Visit(pos, VisitKind.SHUFFLE_CHEST));
+                // Per-batch shuffle: snapshot every visited chest's contents at job start into a
+                // stack-count tracker ("remaining"), then loop "pull up to RANDOMIZE_BATCH_SIZE
+                // stacks from a random pull chest, drop them one-by-one into separate random
+                // destinations" until remaining is empty. Each drop is its own visit, so a stack
+                // never lands in the same chest as another stack in the same batch.
+                randomizeRemaining = new HashMap<>();
+                randomizeBatchDestinations = new HashSet<>();
+                randomizeLeftovers = new ArrayList<>();
+                for (StorageIndex.ChestEntry chest : index.allChests()) {
+                    // Only visited chests count - the index's slots list is the source of truth
+                    // for freeSlots, and a never-opened chest (lastScanned == 0) would send the
+                    // bot to walk to an "empty" container that the server reports as full.
+                    if (chest.lastScanned <= 0 || reservedChests().contains(chest.pos.toBlockPos())) {
+                        continue;
+                    }
+                    for (StorageIndex.SlotEntry slot : chest.slots) {
+                        randomizeRemaining.merge(slot.item, 1, Integer::sum);
+                    }
                 }
+                plan = new ArrayDeque<>(buildRandomizeBatches());
             }
             case DUMP_INVENTORY -> {
                 BlockPos target = nearestChestWithRoom(List.of());
@@ -737,6 +789,8 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
             case DEPOSIT_ITEM -> tickDepositItem();
             case DEPOSIT_BATCH -> tickDepositBatch();
             case SHUFFLE_CHEST -> tickShuffleChest();
+            case SHUFFLE_GRAB -> tickShuffleGrab();
+            case SHUFFLE_DROP -> tickShuffleDrop();
             case DUMP_ALL -> tickDumpAll();
             case DEPOSIT_TO_OUTPUT -> {
                 int slot = interactor.findPlayerSlotWithItem(currentVisit.item());
@@ -903,6 +957,32 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
     private ShuffleState shuffle;
 
     /**
+     * Per-job state for {@link #tickShuffleGrab()} / {@link #tickShuffleDrop()}. {@code remaining}
+     * is the in-memory "finished" tracker built once at job start from a snapshot of every visited
+     * chest - one entry per stack, decremented when that stack is deposited somewhere new.
+     * {@code batchDestinations} is the set of chests already used by the current batch's DROP
+     * visits, so a stack never lands in the same chest as another stack in the same batch.
+     * {@code leftovers} holds item ids whose DROP visit bailed out (the retry cap was hit); the
+     * drain pass picks them up at job end.
+     */
+    private Map<String, Integer> randomizeRemaining;
+    private Set<BlockPos> randomizeBatchDestinations;
+    private List<String> randomizeLeftovers;
+
+    /** How many stacks a SHUFFLE_GRAB visit tries to pull per batch (one hotbar's worth). */
+    private static final int RANDOMIZE_BATCH_SIZE = 9;
+
+    /**
+     * Retry cap for a SHUFFLE_DROP visit. With many chests in the room, half the room is plenty
+     * to find a destination; if that fails the destination really doesn't exist and we should bail
+     * out and let the drain pass handle it. Hard floor of 5 keeps very small rooms workable; hard
+     * ceiling of 20 stops an over-large room from looping unnecessarily.
+     */
+    private static int randomizeRetryCap(int knownChestCount) {
+        return Math.max(5, Math.min(20, (knownChestCount + 1) / 2));
+    }
+
+    /**
      * One chest's worth of a RANDOMIZE pass: unload part of what the bot is carrying into this
      * chest, and pick this chest's own contents up in exchange.
      *
@@ -1006,6 +1086,297 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
             put++;
         }
         return took > 0 || put > 0;
+    }
+
+    /**
+     * Builds the next batch's worth of RANDOMIZE visits (one SHUFFLE_GRAB followed by up to
+     * RANDOMIZE_BATCH_SIZE SHUFFLE_DROPs) and appends them to {@link #plan}. Called once at job
+     * start, then re-invoked at the end of each batch to build the next one. Each batch is
+     * independent so the bot never walks back to a pull chest unless it's still the best pick.
+     */
+    private void appendRandomizeBatch() {
+        if (randomizeRemaining.isEmpty()) {
+            return;
+        }
+        BlockPos pullChest = pickRandomizePullChest();
+        if (pullChest == null) {
+            return;
+        }
+        randomizeBatchDestinations.clear();
+        plan.add(new Visit(pullChest, VisitKind.SHUFFLE_GRAB));
+    }
+
+    /**
+     * Picks a random pull chest for the next batch. Excludes chests the bot is currently at (so a
+     * batch's pull and its drops can use different chests - the user's "separate" rule) and chests
+     * already known to be empty of remaining items (visiting one just to find nothing wastes a
+     * trip). Returns null when no candidate exists; the caller treats that as a job-finish signal.
+     */
+    private BlockPos pickRandomizePullChest() {
+        Set<BlockPos> reserved = reservedChests();
+        Set<String> neededItems = new HashSet<>();
+        for (Map.Entry<String, Integer> entry : randomizeRemaining.entrySet()) {
+            if (entry.getValue() > 0) {
+                neededItems.add(entry.getKey());
+            }
+        }
+        BlockPos botPos = currentVisit == null ? playerPos() : currentVisit.pos();
+        List<BlockPos> candidates = new ArrayList<>();
+        for (StorageIndex.ChestEntry chest : index.allChests()) {
+            BlockPos pos = chest.pos.toBlockPos();
+            if (reserved.contains(pos) || pos.equals(botPos) || chest.lastScanned <= 0) {
+                continue;
+            }
+            // Only chests that still hold at least one item we need - if a chest only holds
+            // items we've already finished, there's nothing useful to pull from it.
+            boolean useful = false;
+            for (StorageIndex.SlotEntry slot : chest.slots) {
+                Integer remaining = randomizeRemaining.get(slot.item);
+                if (remaining != null && remaining > 0) {
+                    useful = true;
+                    break;
+                }
+            }
+            if (useful) {
+                candidates.add(pos);
+            }
+        }
+        if (candidates.isEmpty()) {
+            return null;
+        }
+        Collections.shuffle(candidates);
+        return candidates.getFirst();
+    }
+
+    /**
+     * SHUFFLE_GRAB visit: pull up to RANDOMIZE_BATCH_SIZE stacks from this chest's contents,
+     * skipping slots whose item has already hit zero in the remaining tracker (those are surplus
+     * from earlier batches and would just clutter the inventory). For each stack pulled, plan a
+     * SHUFFLE_DROP visit against a destination chosen NOW (while we still know the index state
+     * before this batch mutates it), then queue it.
+     */
+    private void tickShuffleGrab() {
+        BlockPos pos = currentVisit.pos();
+        List<StorageIndex.SlotEntry> contents = interactor.snapshotContainerSlots();
+        Set<String> heldInChest = new HashSet<>();
+        for (StorageIndex.SlotEntry slot : contents) {
+            heldInChest.add(slot.item);
+        }
+        int pulled = 0;
+        for (StorageIndex.SlotEntry slot : contents) {
+            if (pulled >= RANDOMIZE_BATCH_SIZE) {
+                break;
+            }
+            if (interactor.countFreePlayerSlots() <= 0) {
+                break;
+            }
+            Integer remaining = randomizeRemaining.get(slot.item);
+            // Slot's item isn't tracked (shouldn't happen - we only built remaining from the
+            // same visited-chests source), or is already finished. Either way: leave it.
+            if (remaining == null || remaining <= 0) {
+                continue;
+            }
+            interactor.quickMove(slot.slot);
+            // Confirm the move landed - same defensive check shuffleRound uses, since quickMove
+            // is fire-and-forget client-side and the server can reject silently.
+            if (heldInChest.contains(interactor.containerItemAt(slot.slot))) {
+                continue;
+            }
+            // Pick the destination NOW so the SHUFFLE_DROP visit has a real pos to path to.
+            // Re-validate against the live container on arrival - that's the SHUFFLE_DROP visit's
+            // job - so a chest that filled up between grab and drop gets rejected there.
+            BlockPos destination = pickRandomizeDropDestination(slot.item, pos, List.of());
+            if (destination == null) {
+                // Couldn't find any destination even at planning time. Park it for the drain pass.
+                randomizeLeftovers.add(slot.item);
+                continue;
+            }
+            // Reserve the destination so the next stack in this batch doesn't pick the same one.
+            randomizeBatchDestinations.add(destination);
+            plan.add(new Visit(destination, VisitKind.SHUFFLE_DROP, slot.item));
+            pulled++;
+        }
+        recordSnapshot(pos);
+        // If we pulled nothing, the chest was already drained of needed items (or full of
+        // unrelated items we don't want to disturb). Move on to the next batch by rebuilding
+        // the plan rather than booking a no-op round trip.
+        if (pulled == 0) {
+            appendRandomizeBatch();
+        }
+        finishVisit();
+    }
+
+    /**
+     * Picks a destination chest for one stack of {@code item}, excluding the pull chest, anything
+     * the bot has already tried, anything already used by the current batch (strict rule), and
+     * anything that already holds this item. Returns null when no candidate survives those filters;
+     * the caller can decide whether to relax or defer.
+     */
+    private BlockPos pickRandomizeDropDestination(String item, BlockPos exclude, List<BlockPos> tried) {
+        int cap = randomizeRetryCap(countVisitedChests());
+        Set<BlockPos> reserved = reservedChests();
+        Set<BlockPos> triedSet = new HashSet<>(tried);
+        List<StorageIndex.ChestEntry> candidates = new ArrayList<>();
+        for (StorageIndex.ChestEntry chest : index.allChests()) {
+            BlockPos pos = chest.pos.toBlockPos();
+            if (reserved.contains(pos) || triedSet.contains(pos) || pos.equals(exclude)) {
+                continue;
+            }
+            if (randomizeBatchDestinations.contains(pos)) {
+                continue;
+            }
+            if (freeSlots(chest) <= 0) {
+                continue;
+            }
+            // Skip chests that already hold this item - the existing shuffle invariant. Means we
+            // never collapse two stacks of the same item into one chest during a pass.
+            boolean alreadyHolds = false;
+            for (StorageIndex.SlotEntry slot : chest.slots) {
+                if (item.equals(slot.item)) {
+                    alreadyHolds = true;
+                    break;
+                }
+            }
+            if (alreadyHolds) {
+                continue;
+            }
+            candidates.add(chest);
+        }
+        Collections.shuffle(candidates);
+        BlockPos picked = null;
+        int attempts = 0;
+        for (StorageIndex.ChestEntry chest : candidates) {
+            if (attempts >= cap) {
+                break;
+            }
+            picked = chest.pos.toBlockPos();
+            attempts++;
+        }
+        return picked;
+    }
+
+    /**
+     * SHUFFLE_DROP visit: walk to the destination chest, open it, quickMove one stack in.
+     * The destination was chosen at GRAB time; this visit's job is just the navigation + the
+     * deposit, with a live-container check on arrival to catch chests that filled up since the
+     * batch was planned.
+     */
+    private void tickShuffleDrop() {
+        String item = currentVisit.item();
+        BlockPos destination = currentVisit.pos();
+        // Live check: the chest may have filled up between GRAB time and now.
+        if (interactor.containerSlotCount() <= interactor.snapshotContainerSlots().size()) {
+            // Try to find a replacement destination, otherwise park for drain.
+            BlockPos replacement = pickRandomizeDropDestination(item, destination,
+                    new ArrayList<>(currentVisit.triedChests()));
+            if (replacement == null) {
+                warn("Destination {} filled up and no alternative for {} - deferring to drain", destination, item);
+                randomizeLeftovers.add(item);
+                finishVisit();
+                return;
+            }
+            // Substitute the destination in-place: cancel this visit, queue a new one against
+            // the replacement with the original destination added to triedChests.
+            randomizeBatchDestinations.remove(destination);
+            randomizeBatchDestinations.add(replacement);
+            plan.addFirst(new Visit(replacement, VisitKind.SHUFFLE_DROP, item));
+            finishVisit();
+            return;
+        }
+        int slot = interactor.findPlayerSlotWithItem(item);
+        if (slot < 0) {
+            // Stack gone (server rejected earlier, another mod intervened). Just finish.
+            finishVisit();
+            return;
+        }
+        interactor.quickMove(slot);
+        int before = interactor.countPlayerItems(item);
+        if (interactor.countPlayerItems(item) >= before) {
+            // Server rejected the move - chest really was full even though containerSlotCount
+            // said there was room (e.g. single-chest sized as 54, double-chest with no room).
+            // Mark this destination as tried and re-pick.
+            randomizeBatchDestinations.remove(destination);
+            BlockPos replacement = pickRandomizeDropDestination(item, destination,
+                    mergeTried(currentVisit.triedChests(), destination));
+            if (replacement == null) {
+                randomizeLeftovers.add(item);
+                finishVisit();
+                return;
+            }
+            randomizeBatchDestinations.add(replacement);
+            plan.addFirst(new Visit(replacement, VisitKind.SHUFFLE_DROP, item));
+            finishVisit();
+            return;
+        }
+        // Success: mark this stack finished.
+        decrementRemaining(item);
+        recordSnapshot(destination);
+        // If everything is finished, kick off the drain pass for any leftovers accumulated
+        // from earlier batches.
+        if (randomizeRemaining.isEmpty() && !randomizeLeftovers.isEmpty()) {
+            plan.addAll(drainVisits(destination));
+        }
+        finishVisit();
+    }
+
+    private static List<BlockPos> mergeTried(List<BlockPos> existing, BlockPos extra) {
+        List<BlockPos> merged = new ArrayList<>(existing);
+        merged.add(extra);
+        return merged;
+    }
+
+    /** Counts chests the index actually knows the contents of - used to size the retry cap. */
+    private int countVisitedChests() {
+        int n = 0;
+        for (StorageIndex.ChestEntry chest : index.allChests()) {
+            if (chest.lastScanned > 0 && !reservedChests().contains(chest.pos.toBlockPos())) {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    private void decrementRemaining(String item) {
+        Integer count = randomizeRemaining.get(item);
+        if (count == null) {
+            return;
+        }
+        if (count <= 1) {
+            randomizeRemaining.remove(item);
+        } else {
+            randomizeRemaining.put(item, count - 1);
+        }
+    }
+
+    /**
+     * First call into the RANDOMIZE plan - replaces the old one-visit-per-chest loop. Builds the
+     * first batch of GRAB + DROP visits; subsequent batches are appended by SHUFFLE_GRAB itself
+     * (or by the drain pass if it kicks in mid-plan).
+     */
+    private List<Visit> buildRandomizeBatches() {
+        List<Visit> initial = new ArrayList<>();
+        if (randomizeRemaining.isEmpty()) {
+            // Nothing in any visited chest - the user clicked Randomize on a freshly scanned
+            // (but unvisited) region, or on an empty storage room. Surface a warning instead of
+            // booking a useless walk.
+            warn("No visited storage chests to randomize - run a scan and visit the chests first");
+            return initial;
+        }
+        appendRandomizeBatchTo(initial);
+        return initial;
+    }
+
+    /** Same as {@link #appendRandomizeBatch()} but into a caller-supplied list. */
+    private void appendRandomizeBatchTo(List<Visit> into) {
+        if (randomizeRemaining.isEmpty()) {
+            return;
+        }
+        BlockPos pullChest = pickRandomizePullChest();
+        if (pullChest == null) {
+            return;
+        }
+        randomizeBatchDestinations.clear();
+        into.add(new Visit(pullChest, VisitKind.SHUFFLE_GRAB));
     }
 
     /**
@@ -1116,49 +1487,103 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
         finishVisit();
     }
 
-    /** Empties the input chest, consolidating each item into a chest that already holds some. */
+/**
+     * Empties the input chest by scattering each stack into an independently-chosen random
+     * storage chest - two stacks of the same item intentionally end up in different chests
+     * (this is the whole point of the sort: not consolidation). When more stacks of one item
+     * are pulled than there are chests available, the surplus falls back to whatever chest
+     * has room and the user is warned; the alternative is leaving stacks in the inventory,
+     * which an unprioritised sort pass would never pick back up.
+     */
     private void tickReadInput() {
         List<StorageIndex.SlotEntry> contents = interactor.snapshotContainerSlots();
         int capacity = interactor.countFreePlayerSlots();
         Set<BlockPos> reserved = reservedChests();
-        Set<String> takenItems = new LinkedHashSet<>();
-        boolean outOfSpace = false;
-        int taken = 0;
+        // Refuse the whole pass if any item has nowhere to go - partial sorting would strand
+        // the rest in the inventory, and the original per-item check fired once per pull.
+        // Hoisting it out means a region that hasn't been scanned yet never half-drains.
         for (StorageIndex.SlotEntry entry : contents) {
-            if (taken >= capacity) {
+            if (index.depositCandidates(entry.item, reserved).isEmpty()) {
+                warn("No storage chest to sort {} into - rescan the region first", entry.item);
+                recordSnapshot(currentVisit.pos());
+                finishVisit();
+                return;
+            }
+        }
+        // Pull stacks one at a time, but track per-stack rather than per-item: with
+        // identical items we want each slot to land in its own chest, and the old
+        // LinkedHashSet<String> silently collapsed same-item stacks into one destination.
+        List<StorageIndex.SlotEntry> pulled = new ArrayList<>();
+        boolean outOfSpace = false;
+        for (StorageIndex.SlotEntry entry : contents) {
+            if (pulled.size() >= capacity) {
                 // Input chest (e.g. a double chest) has more distinct stacks than the bot
                 // can carry at once - grab what fits now and queue another sort pass for
                 // the rest instead of trying to quick-move into a full inventory.
                 outOfSpace = true;
                 break;
             }
-            // Confirm there's somewhere to put it before pulling it out - with the
-            // input/output chests now excluded, a region that hasn't been scanned yet has
-            // no candidates at all, and taking it anyway would strand it in the inventory.
-            if (index.depositCandidates(entry.item, reserved).isEmpty()) {
-                warn("No storage chest to sort {} into - rescan the region first", entry.item);
-                break;
-            }
             // Actually pull it out of the input chest into the bot's own inventory -
             // reading the snapshot alone never removed anything.
             interactor.quickMove(entry.slot);
-            taken++;
-            takenItems.add(entry.item);
+            pulled.add(entry);
         }
-        // One visit per distinct item, not per stack. DEPOSIT_ITEM now unloads every stack
-        // of an item in a single visit, so queueing one per slot just sent the bot to walk
-        // to, open, and close extra chests after the items had already been put away.
-        for (String item : takenItems) {
-            BlockPos dest = index.depositCandidates(item, reserved).stream()
-                    .findFirst().orElse(null);
-            if (dest != null) {
-                plan.add(new Visit(dest, VisitKind.DEPOSIT_ITEM, item));
+        // Per-stack routing. holds.get(pos) tracks which item ids this pass has already
+        // sent to that chest, so two cobblestone stacks don't pile onto the same chest when
+        // any other chest is available. The destination list is shuffled once so each
+        // stack sees chests in a fresh order; without the shuffle, the LinkedHashMap
+        // iteration would always pick the same first-registered chest.
+        List<BlockPos> destinations = index.allChests().stream()
+                .map(c -> c.pos.toBlockPos())
+                .filter(p -> !reserved.contains(p))
+                .collect(Collectors.toCollection(ArrayList::new));
+        Collections.shuffle(destinations);
+        Map<BlockPos, Set<String>> holds = new HashMap<>();
+        for (BlockPos pos : destinations) {
+            holds.put(pos, new HashSet<>());
+        }
+        // Shuffle the pulled stacks too so adjacent same-item stacks don't all hit the same
+        // first-pass candidate in lockstep.
+        Collections.shuffle(pulled);
+        Map<BlockPos, List<String>> batches = new LinkedHashMap<>();
+        int doubled = 0;
+        for (StorageIndex.SlotEntry entry : pulled) {
+            BlockPos chosen = null;
+            for (BlockPos pos : destinations) {
+                if (!holds.get(pos).contains(entry.item)) {
+                    chosen = pos;
+                    break;
+                }
             }
+            if (chosen == null) {
+                // More stacks of this item than chests that don't already hold it - the
+                // surplus has to go somewhere, so fall back to any chest with room and
+                // surface the count rather than silently doubling up.
+                for (BlockPos pos : destinations) {
+                    chosen = pos;
+                    break;
+                }
+                if (chosen != null) {
+                    doubled++;
+                }
+            }
+            if (chosen == null) {
+                continue;
+            }
+            holds.get(chosen).add(entry.item);
+            batches.computeIfAbsent(chosen, key -> new ArrayList<>()).add(entry.item);
+        }
+        if (doubled > 0) {
+            warn("Not enough chests to scatter {} stack(s) - doubled them up on existing chests", doubled);
+        }
+        BlockPos origin = currentVisit.pos();
+        for (BlockPos pos : nearestFirst(new ArrayList<>(batches.keySet()), origin)) {
+            plan.add(new Visit(pos, VisitKind.DEPOSIT_BATCH, batches.get(pos), List.of()));
         }
         // Only chase the leftovers when this pass actually shifted something, otherwise a
         // bot that's already full (capacity 0) re-queues SORT_INPUT forever without moving
-        // a single item.
-        if (outOfSpace && taken > 0) {
+        // a single stack.
+        if (outOfSpace && !pulled.isEmpty()) {
             queue.enqueue(Job.sortInput());
         }
         recordSnapshot(currentVisit.pos());
@@ -1220,6 +1645,14 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
      */
     private void finishVisit() {
         interactor.close();
+        // For RANDOMIZE, each batch is independent - if the plan is empty but more items still
+        // need scattering, build the next batch here rather than finishing the job. Without this
+        // the bot would stop after one batch's worth of drops even if half the room's stacks
+        // remained unvisited.
+        if (currentJob != null && currentJob.type == Job.Type.RANDOMIZE
+                && randomizeRemaining != null && !randomizeRemaining.isEmpty()) {
+            appendRandomizeBatch();
+        }
         nextVisitOrFinish();
     }
 
@@ -1235,8 +1668,14 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
         plan = null;
         currentVisit = null;
         shuffle = null;
-        // Index writes are debounced, but a just-finished job is a natural point to persist at
-        // rather than leaving the last few chests riding on the background flush.
-        index.flush();
+        randomizeRemaining = null;
+        randomizeBatchDestinations = null;
+        randomizeLeftovers = null;
+        // Nudge the daemon saver to flush sooner than its next 5s tick rather than blocking the
+        // client tick thread on disk I/O here - flush() does sync writes, and finishJob() runs on
+        // the tick thread, so calling it would re-introduce exactly the stutter the debounced
+        // saver was added to remove. requestFlush() wakes the saver via its signal queue; the
+        // wall-clock gap to disk is "a few ms" rather than "up to 5s".
+        index.requestFlush();
     }
 }
