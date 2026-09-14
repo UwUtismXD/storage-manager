@@ -4,6 +4,8 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 
+import storage.manager.StorageManager;
+
 import storage.manager.client.job.JobExecutor;
 import storage.manager.client.job.JobQueue;
 import storage.manager.client.storage.StorageIndex;
@@ -25,6 +27,14 @@ public class StorageManagerClient implements ClientModInitializer {
     public void onInitializeClient() {
         index = new StorageIndex();
         index.load();
+        // A previous JVM may have died mid-flush, leaving .tmp-* siblings on disk. Pick
+        // them up before the saver starts so the next write doesn't race with their stale
+        // presence. Quarantined, not deleted - same recovery story as a corrupt index.
+        try {
+            index.recoverLeftoverTempFiles();
+        } catch (java.io.IOException e) {
+            StorageManager.LOGGER.error("Failed to recover leftover temp index files", e);
+        }
         index.startAutoSave();
 
         textures = new ItemTextures();

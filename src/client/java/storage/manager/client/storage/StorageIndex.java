@@ -12,15 +12,21 @@ import java.io.IOException;
 import java.io.Reader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.LinkedBlockingQueue;
 
 /**
  * Live index of every known chest, its contents and where deposits/withdrawals
@@ -32,6 +38,12 @@ import java.util.Map;
  * flushes at most once every {@link #SAVE_INTERVAL_MILLIS}. Saving inline on every change
  * meant a region scan serialized the whole (growing) index once per chest found and again
  * per chest visited - quadratic work, all of it stalling the client tick thread.
+ *
+ * <p>Producers that want the next save to happen sooner than the next scheduled tick (e.g.
+ * {@code JobExecutor.finishJob()}) call {@link #requestFlush()} to nudge the saver via the
+ * {@link #flushSignal} queue - the saver drains the signal before sleeping, so the wall-clock
+ * gap between a job finishing and its result hitting disk is "a few ms" rather than "up to
+ * {@code SAVE_INTERVAL_MILLIS}".
  */
 public class StorageIndex {
 
@@ -113,6 +125,29 @@ public class StorageIndex {
 
     private static final long SAVE_INTERVAL_MILLIS = 5000L;
 
+    /**
+     * Refuse to deserialize anything larger than this. A real index fits in single-digit MB
+     * even for a very large storage room; anything bigger is corrupted-by-bloat or a hand-
+     * edited bomb. Quarantined on load rather than fed to Gson, which would OOM before parsing.
+     */
+    private static final long MAX_INDEX_BYTES = 50L * 1024L * 1024L;
+
+    /**
+     * Positional bounds applied at load time. Minecraft's world border is at \u00b129,999,984 from
+     * spawn; anything outside is junk and gets skipped during validation so it can't NPE a
+     * later web request.
+     */
+    private static final int POS_MIN = -30_000_000;
+    private static final int POS_MAX = 30_000_000;
+
+    /**
+     * Format for quarantine filenames. {@code :} in {@link DateTimeFormatter#ISO_INSTANT} is
+     * illegal on Windows; the literal {@code '}''} here substitutes a hyphen so the path is
+     * portable.
+     */
+    private static final DateTimeFormatter QUARANTINE_TIMESTAMP =
+            DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
+
     private final Path file;
 
     private Region region = new Region();
@@ -121,6 +156,14 @@ public class StorageIndex {
     private final Map<String, ChestEntry> chests = new LinkedHashMap<>();
     private final Object flushLock = new Object();
     private boolean dirty;
+
+    /**
+     * One-slot signal the daemon saver waits on. Producers (any thread that wants the next
+     * save to happen sooner than the {@link #SAVE_INTERVAL_MILLIS} tick) call
+     * {@link #requestFlush()}; the saver drains the signal before sleeping. {@code poll(timeout)}
+     * releases the saver thread promptly instead of letting it finish its current sleep first.
+     */
+    private final LinkedBlockingQueue<Boolean> flushSignal = new LinkedBlockingQueue<>(1);
 
     public StorageIndex() {
         this(FabricLoader.getInstance().getConfigDir()
@@ -137,23 +180,157 @@ public class StorageIndex {
         this.file = file;
     }
 
+    /**
+     * Reads the index from disk. Three failure modes are handled deliberately rather than left
+     * to propagate as uncaught exceptions:
+     *
+     * <ul>
+     *   <li><b>File absent</b> \u2192 no-op, start with empty state.</li>
+     *   <li><b>File too large</b> (\u003e {@link #MAX_INDEX_BYTES}) \u2192 quarantined; refusing to
+     *       feed Gson a multi-GB blob keeps the JVM from OOMing.</li>
+     *   <li><b>Parse / IO failure of any kind</b> \u2192 quarantined; the broken file is renamed
+     *       aside so the user can recover from it and so the next successful flush doesn't
+     *       silently overwrite the evidence of what went wrong.</li>
+     * </ul>
+     *
+     * <p>{@code JsonSyntaxException} extends {@code RuntimeException}, not {@code IOException},
+     * so a bare {@code catch (IOException)} here (the previous version) let malformed JSON escape
+     * to {@code onInitializeClient()} and fail the game start. The broader catch covers both.
+     *
+     * <p>Returns silently with empty state on failure; the caller never sees a thrown exception
+     * from this method.
+     */
     public synchronized void load() {
         if (!Files.exists(file)) {
             return;
         }
-        try (Reader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
-            Data data = GSON.fromJson(reader, Data.class);
-            if (data != null) {
-                this.region = data.region != null ? data.region : new Region();
-                this.inputChest = data.inputChest;
-                this.outputChest = data.outputChest;
-                this.chests.clear();
-                if (data.chests != null) {
-                    this.chests.putAll(data.chests);
-                }
-            }
+        long size;
+        try {
+            size = Files.size(file);
         } catch (IOException e) {
-            StorageManager.LOGGER.error("Failed to load storage index", e);
+            StorageManager.LOGGER.error("Could not stat storage index, starting empty", e);
+            return;
+        }
+        if (size > MAX_INDEX_BYTES) {
+            quarantine(file, "too large (" + size + " bytes)");
+            return;
+        }
+        Data data;
+        try (Reader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
+            data = GSON.fromJson(reader, Data.class);
+        } catch (Exception e) {
+            // Catches IOException + JsonSyntaxException + JsonParseException + anything else
+            // Gson can throw. The file gets renamed aside in a separate try block so a failure
+            // there (full disk, antivirus lock on Windows) doesn't mask the original parse error.
+            StorageManager.LOGGER.error("Failed to parse storage index, quarantining", e);
+            quarantine(file, "parse failure: " + e.getClass().getSimpleName());
+            return;
+        }
+        if (data == null) {
+            return;
+        }
+        this.region = data.region != null ? data.region : new Region();
+        // inputChest / outputChest: null is the legitimate "not configured" state, leave alone.
+        this.inputChest = data.inputChest;
+        this.outputChest = data.outputChest;
+        this.chests.clear();
+        if (data.chests != null) {
+            int skipped = 0;
+            StringBuilder skippedPositions = new StringBuilder();
+            for (Map.Entry<String, ChestEntry> entry : data.chests.entrySet()) {
+                ChestEntry chest = entry.getValue();
+                if (!isValidChest(chest)) {
+                    skipped++;
+                    if (skippedPositions.length() < 256) {
+                        if (skippedPositions.length() > 0) {
+                            skippedPositions.append(", ");
+                        }
+                        skippedPositions.append(entry.getKey());
+                    }
+                    continue;
+                }
+                this.chests.put(entry.getKey(), chest);
+            }
+            if (skipped > 0) {
+                String more = skippedPositions.length() >= 256 ? ", ..." : "";
+                StorageManager.LOGGER.warn("Skipped {} invalid chest entries from index: {}{}",
+                        skipped, skippedPositions, more);
+            }
+        }
+    }
+
+    /**
+     * True when a deserialized {@link ChestEntry} has a non-null, in-bounds position, a
+     * non-blank type, a non-null slots list, and every slot is internally consistent.
+     * Null {@code pos} is the main realistic failure - a missing JSON field becomes a default-
+     * initialized {@code Pos} or a literal null depending on Gson internals, and a literal null
+     * then NPEs on every {@code chest.pos.toBlockPos()} later.
+     */
+    private static boolean isValidChest(ChestEntry chest) {
+        if (chest == null) {
+            return false;
+        }
+        if (chest.pos == null) {
+            return false;
+        }
+        if (chest.pos.x < POS_MIN || chest.pos.x > POS_MAX
+                || chest.pos.y < POS_MIN || chest.pos.y > POS_MAX
+                || chest.pos.z < POS_MIN || chest.pos.z > POS_MAX) {
+            return false;
+        }
+        if (chest.type == null || chest.type.isBlank()) {
+            return false;
+        }
+        if (chest.slots == null) {
+            // Gson can overwrite a default-initialized field with null when the JSON has
+            // "slots": null - defensive against that.
+            return false;
+        }
+        for (SlotEntry slot : chest.slots) {
+            if (slot == null || slot.slot < 0 || slot.slot >= Math.max(chest.size, 1)) {
+                return false;
+            }
+            if (slot.count < 0) {
+                return false;
+            }
+            if (slot.item == null || slot.item.isBlank()) {
+                return false;
+            }
+            // damage / maxDamage must come as a pair - a future migration that flips one to int
+            // and forgets the other would silently break the durability bar; reject the half-set
+            // case now so the bad shape doesn't ride through load.
+            if ((slot.damage == null) != (slot.maxDamage == null)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Moves {@code badFile} aside to a unique {@code .corrupt-<timestamp>} sibling, so the
+     * evidence of what failed is preserved and the next {@link #flush()} doesn't silently
+     * overwrite it. Errors here are logged but never re-thrown - a rename failure must not
+     * mask the parse failure that triggered this call, nor escape to {@code onInitializeClient()}.
+     */
+    private void quarantine(Path badFile, String reason) {
+        try {
+            Files.createDirectories(badFile.getParent());
+        } catch (IOException e) {
+            StorageManager.LOGGER.error("Could not create index directory to quarantine {} ({})",
+                    badFile, reason, e);
+            return;
+        }
+        String base = badFile.getFileName().toString();
+        Path target = badFile.resolveSibling(base + ".corrupt-"
+                + QUARANTINE_TIMESTAMP.format(Instant.now()) + "-" + UUID.randomUUID().toString().substring(0, 8));
+        try {
+            Files.move(badFile, target);
+            StorageManager.LOGGER.error("Quarantined unreadable index to {} ({}). The file " +
+                    "is preserved for recovery; rename it back to {} once it's repaired.",
+                    target, reason, badFile.getFileName());
+        } catch (IOException e) {
+            StorageManager.LOGGER.error("Could not quarantine unreadable index {} ({}) - " +
+                    "file left in place; next flush will overwrite it", badFile, reason, e);
         }
     }
 
@@ -162,15 +339,35 @@ public class StorageIndex {
         Thread saver = new Thread(() -> {
             while (true) {
                 try {
-                    Thread.sleep(SAVE_INTERVAL_MILLIS);
+                    Boolean ignored2 = flushSignal.poll(SAVE_INTERVAL_MILLIS,
+                            java.util.concurrent.TimeUnit.MILLISECONDS);
+                    if (ignored2 == null) {
+                        // Timeout: regular tick. Flush anyway in case the index went dirty
+                        // without an explicit request (none today, but keeps the invariant simple).
+                        flush();
+                        continue;
+                    }
+                    // Drain any extra signals that piled up before we woke up - a job finishing
+                    // during a slow flush can stack signals, but the queue is size-1 so only the
+                    // first matters.
+                    flushSignal.clear();
+                    flush();
                 } catch (InterruptedException e) {
                     return;
                 }
-                flush();
             }
         }, "storage-manager-index-saver");
         saver.setDaemon(true);
         saver.start();
+    }
+
+    /**
+     * Asks the daemon saver to wake up and flush sooner than its next scheduled tick. Safe to
+     * call from any thread; the worst case is the saver is already awake, in which case the
+     * signal queue is already non-empty and the {@code offer} is a no-op.
+     */
+    public void requestFlush() {
+        flushSignal.offer(Boolean.TRUE);
     }
 
     private synchronized void markDirty() {
@@ -205,24 +402,39 @@ public class StorageIndex {
                 writeAtomically(json);
             } catch (IOException e) {
                 StorageManager.LOGGER.error("Failed to save storage index", e);
-                markDirty(); // try again on the next flush rather than dropping the changes
+                synchronized (this) {
+                    dirty = true; // try again on the next flush rather than dropping the changes
+                }
             }
         }
     }
 
     /**
-     * Writes via a temp file and a rename. Now that saves are debounced each one carries up to
-     * {@link #SAVE_INTERVAL_MILLIS} of work, so a crash mid-write shouldn't be able to leave a
-     * half-written index behind - the old file stays intact until the new one is complete.
+     * Writes via a uniquely-named temp file then a rename. On filesystems that support atomic
+     * rename ({@code ATOMIC_MOVE}) a crash mid-write leaves the old {@code file} intact and a
+     * {@code .tmp-<uuid>} sibling behind - load()'s leftover-tmp recovery uses that sibling.
+     *
+     * <p>On filesystems that don't support atomic rename (FAT, some network mounts), the rename
+     * is replaced by a copy + delete so a crash never leaves both the temp and the destination
+     * half-written: copy either succeeds (target is whole, leftover tmp is just garbage to clean
+     * up next load) or doesn't run at all. The destination is always overwritten atomically with
+     * respect to readers that open it before the copy starts; readers that open it mid-copy
+     * see a truncated file, which is exactly the case {@link #load()} handles by quarantining.
      */
     private void writeAtomically(String json) throws IOException {
-        Files.createDirectories(file.getParent());
-        Path temp = file.resolveSibling(file.getFileName() + ".tmp");
+        Path parent = file.getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+        }
+        Path temp = file.resolveSibling(file.getFileName() + ".tmp-" + UUID.randomUUID());
         Files.writeString(temp, json, StandardCharsets.UTF_8);
         try {
             Files.move(temp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
         } catch (AtomicMoveNotSupportedException e) {
-            Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING);
+            // Copy replaces the destination, then the source is removed. If the JVM dies between
+            // copy and delete, the leftover .tmp is detected on the next load and recovered.
+            Files.copy(temp, file, StandardCopyOption.REPLACE_EXISTING);
+            Files.delete(temp);
         }
     }
 
@@ -407,5 +619,50 @@ public class StorageIndex {
         }
         Collections.shuffle(result);
         return result;
+    }
+
+    /**
+     * Visible to tests: the directory this index reads/writes, so tests can scan for leftover
+     * {@code .tmp-*} siblings and quarantined {@code .corrupt-*} files.
+     */
+    Path getFile() {
+        return file;
+    }
+
+    /**
+     * Visible to tests: the signal queue, so tests can confirm {@link #requestFlush()} wakes
+     * the saver.
+     */
+    LinkedBlockingQueue<Boolean> getFlushSignal() {
+        return flushSignal;
+    }
+
+    /**
+     * Visible to tests: scans the index's directory for leftover {@code .tmp-*} files left by
+     * a crashed {@link #writeAtomically()} and quarantines them. Public so a test, or a future
+     * "clean up on startup" caller, can drive it directly.
+     *
+     * <p>Returns the number of files quarantined.
+     */
+    public int recoverLeftoverTempFiles() throws IOException {
+        Path parent = file.getParent();
+        if (parent == null) {
+            return 0;
+        }
+        int recovered = 0;
+        List<Path> toQuarantine = new ArrayList<>();
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(parent, path -> {
+            String name = path.getFileName().toString();
+            return name.startsWith(file.getFileName().toString() + ".tmp-");
+        })) {
+            for (Path entry : stream) {
+                toQuarantine.add(entry);
+            }
+        }
+        for (Path tmp : toQuarantine) {
+            quarantine(tmp, "leftover temp from interrupted write");
+            recovered++;
+        }
+        return recovered;
     }
 }
