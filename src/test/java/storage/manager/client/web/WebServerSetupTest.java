@@ -36,8 +36,8 @@ class WebServerSetupTest {
         executor = new FakeExecutor();
         // ItemTextures is unused by /api/setup; passing null would NPE on construction, so use
         // a stub that the test never exercises. JobQueue is real but the setup POST never
-        // enqueues anything.
-        server = new WebServer(new JobQueue(), index, executor, new UnusedTextures());
+        // enqueues anything. Baritone settings are never reached from /api/setup either.
+        server = new WebServer(new JobQueue(), index, executor, new UnusedTextures(), null);
     }
 
     @Test

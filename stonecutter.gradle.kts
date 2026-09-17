@@ -21,6 +21,15 @@ stonecutter parameters {
             // ResourceKey.location() -> identifier(). Scoped to the receiver so it can't
             // touch an unrelated location() call elsewhere.
             replace("key.location()", "key.identifier()")
+
+            // Util moved package. Only the Meteor addon uses it.
+            replace("net.minecraft.Util", "net.minecraft.util.Util")
+        }
+
+        // Screen switching moved off Minecraft onto its Gui - in 26.2, not 26.1.2, which still
+        // has the old call. Receiver-scoped so it can't touch an unrelated setScreen elsewhere.
+        string(current.parsed >= "26.2") {
+            replace("mc.setScreen(", "mc.gui.setScreen(")
         }
     }
 }

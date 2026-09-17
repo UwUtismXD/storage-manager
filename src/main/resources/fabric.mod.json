@@ -3,7 +3,7 @@
 	"id": "${id}",
 	"version": "${version}",
 	"name": "${name}",
-	"description": "A Baritone-powered storage bot: walks to chests to store and fetch items, controlled via a local web UI.",
+	"description": "A Baritone-powered storage bot: walks to chests to store and fetch items, controlled via a local web UI or a Meteor Client panel.",
 	"authors": [
 		"UwUtismXD"
 	],
@@ -19,8 +19,17 @@
 		],
 		"client": [
 			"storage.manager.client.StorageManagerClient"
+		],
+		"meteor": [
+			"storage.manager.client.meteor.StorageManagerAddon"
 		]
 	},
+	"custom": {
+		"meteor-client:color": "120,190,255"
+	},
+	"mixins": [
+		"storage-manager.mixins.json"
+	],
 	"depends": {
 		"fabricloader": ">=0.19.3",
 		"minecraft": "${minecraft}",

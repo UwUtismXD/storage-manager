@@ -56,6 +56,15 @@ class JobTest {
     }
 
     @Test
+    void craftCarriesItemAndCount() {
+        Job j = Job.craft("minecraft:stick", 8);
+        assertEquals(Job.Type.CRAFT, j.type);
+        assertEquals("minecraft:stick", j.itemId);
+        assertEquals(8, j.count);
+        assertNull(j.sourceChest);
+    }
+
+    @Test
     void toStringFormatsEachTypeWithItsRelevantData() {
         // The exact strings feed the status panel - changing them silently breaks the UI,
         // so pin them rather than re-deriving at the call site.
@@ -66,5 +75,18 @@ class JobTest {
         assertEquals("WITHDRAW 64x minecraft:diamond", Job.withdraw("minecraft:diamond", 64).toString());
         Job slot = Job.withdrawSlot(new BlockPos(1, 2, 3), 4, "minecraft:oak_log", 16);
         assertEquals("WITHDRAW minecraft:oak_log from 1,2,3 slot 4", slot.toString());
+        assertEquals("CRAFT 8x minecraft:stick", Job.craft("minecraft:stick", 8).toString());
+        assertEquals("GATHER 32x minecraft:raw_iron", Job.gather("minecraft:raw_iron", 32).toString());
+        assertEquals("EQUIP tools", Job.equipTools().toString());
+        assertEquals("STOW tools", Job.stowTools().toString());
+        assertEquals("KIT diamond tools", Job.kit().toString());
+    }
+
+    @Test
+    void gatherCarriesItemAndCount() {
+        Job j = Job.gather("minecraft:oak_log", 64);
+        assertEquals(Job.Type.GATHER, j.type);
+        assertEquals("minecraft:oak_log", j.itemId);
+        assertEquals(64, j.count);
     }
 }

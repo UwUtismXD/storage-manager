@@ -3,7 +3,10 @@ package storage.manager.client.job;
 import net.minecraft.core.BlockPos;
 
 public class Job {
-    public enum Type { SCAN_REGION, SORT_INPUT, WITHDRAW, RANDOMIZE, WITHDRAW_SLOT, DUMP_INVENTORY }
+    public enum Type {
+        SCAN_REGION, SORT_INPUT, WITHDRAW, RANDOMIZE, WITHDRAW_SLOT, DUMP_INVENTORY, CRAFT,
+        GATHER, EQUIP_TOOLS, STOW_TOOLS, KIT
+    }
 
     public final Type type;
     public final String itemId;
@@ -40,6 +43,38 @@ public class Job {
         return new Job(Type.RANDOMIZE, null, 0);
     }
 
+    /** Requests that the bot craft {@code count} worth of {@code itemId} from a known recipe. */
+    public static Job craft(String itemId, int count) {
+        return new Job(Type.CRAFT, itemId, count);
+    }
+
+    /**
+     * Mines until {@code count} of {@code itemId} have been picked up, putting everything away each
+     * time the inventory fills. {@code itemId} may also name a block, e.g. an ore, in which case
+     * what it drops is gathered.
+     */
+    public static Job gather(String itemId, int count) {
+        return new Job(Type.GATHER, itemId, count);
+    }
+
+    /** Takes the best pickaxe, axe and shovel storage has and keeps them out of every deposit. */
+    public static Job equipTools() {
+        return new Job(Type.EQUIP_TOOLS, null, 0);
+    }
+
+    /**
+     * Debug: gets the bot a diamond pickaxe, axe, shovel, sword and hoe and equips them - withdrawn,
+     * crafted, or crafted from materials it gathers first.
+     */
+    public static Job kit() {
+        return new Job(Type.KIT, null, 0);
+    }
+
+    /** Unequips every tool and puts them, with anything else the bot carries, back into storage. */
+    public static Job stowTools() {
+        return new Job(Type.STOW_TOOLS, null, 0);
+    }
+
     /**
      * Unloads whatever the bot is carrying into the nearest chest with room. Queued by the stop
      * button rather than the UI directly - stopping mid-job usually leaves items in the inventory,
@@ -68,6 +103,11 @@ public class Job {
             case WITHDRAW_SLOT -> "WITHDRAW " + itemId + " from "
                     + sourceChest.getX() + "," + sourceChest.getY() + "," + sourceChest.getZ()
                     + " slot " + sourceSlot;
+            case CRAFT -> "CRAFT " + count + "x " + itemId;
+            case GATHER -> "GATHER " + count + "x " + itemId;
+            case EQUIP_TOOLS -> "EQUIP tools";
+            case STOW_TOOLS -> "STOW tools";
+            case KIT -> "KIT diamond tools";
         };
     }
 }

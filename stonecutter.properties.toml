@@ -14,6 +14,9 @@ mod.baritone_id = "baritone"
 mod.baritone_jar = "libs/baritone-api-fabric-1.15.0.jar"
 
 deps.fabric_api = "0.136.1+1.21.8"
+# Meteor publishes one snapshot line per Minecraft version; the addon is compiled against the
+# matching one. It's a compile-time dependency only - the mod runs fine without Meteor installed.
+deps.meteor_client = "1.21.8-SNAPSHOT"
 
 ["26.1.2"]
 mod.mc_compat = "~26.1.2"
@@ -24,6 +27,7 @@ mod.baritone_id = "baritone-meteor"
 mod.baritone_jar = "jars/baritone-meteor-26.1.jar"
 
 deps.fabric_api = "0.155.2+26.1.2"
+deps.meteor_client = "26.1.2-SNAPSHOT"
 
 ["26.2"]
 mod.mc_compat = "~26.2"
@@ -33,3 +37,4 @@ mod.baritone_id = "baritone-meteor"
 mod.baritone_jar = "jars/baritone-meteor-26.2.jar"
 
 deps.fabric_api = "0.157.0+26.2"
+deps.meteor_client = "26.2-SNAPSHOT"

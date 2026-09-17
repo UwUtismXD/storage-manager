@@ -16,6 +16,7 @@ import net.minecraft.world.item.enchantment.Enchantment;
 import net.minecraft.world.item.enchantment.ItemEnchantments;
 import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.inventory.ClickType;
+import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
@@ -24,6 +25,8 @@ import storage.manager.client.storage.StorageIndex;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.function.Supplier;
 
 /**
  * Opens/reads/closes a chest-like container using the same client-interaction
@@ -46,8 +49,23 @@ public class ChestInteractor {
     private static final List<DataComponentType<ItemEnchantments>> ENCHANTMENT_COMPONENTS =
             List.of(DataComponents.ENCHANTMENTS, DataComponents.STORED_ENCHANTMENTS);
 
+    /**
+     * Player-inventory indices (0-35) holding the bot's equipped tools. Every "what is the bot
+     * carrying" read below skips them, so no deposit, dump or delivery ever picks a tool up as
+     * cargo - one place to get it right rather than a check in every job.
+     */
+    private Supplier<Set<Integer>> keptSlots = Set::of;
+
     private static Minecraft client() {
         return Minecraft.getInstance();
+    }
+
+    public void setKeptSlots(Supplier<Set<Integer>> keptSlots) {
+        this.keptSlots = keptSlots;
+    }
+
+    private static boolean isKept(LocalPlayer player, Slot slot, Set<Integer> kept) {
+        return !kept.isEmpty() && slot.container == player.getInventory() && kept.contains(slot.getContainerSlot());
     }
 
     public void open(BlockPos pos) {
@@ -170,32 +188,37 @@ public class ChestInteractor {
         return free;
     }
 
-    /** Finds a player-inventory-side slot (index >= containerSlotCount()) holding this item. */
+    /** Finds a player-inventory-side slot (index >= containerSlotCount()) holding this item, never an equipped tool. */
     public int findPlayerSlotWithItem(String itemId) {
         LocalPlayer player = client().player;
         if (player == null || !isOpen()) {
             return -1;
         }
         AbstractContainerMenu menu = player.containerMenu;
+        Set<Integer> kept = keptSlots.get();
         int containerCount = containerSlotCount();
         for (int i = containerCount; i < menu.slots.size(); i++) {
-            ItemStack stack = menu.getSlot(i).getItem();
-            if (!stack.isEmpty() && BuiltInRegistries.ITEM.getKey(stack.getItem()).toString().equals(itemId)) {
+            Slot slot = menu.getSlot(i);
+            ItemStack stack = slot.getItem();
+            if (!stack.isEmpty() && !isKept(player, slot, kept)
+                    && BuiltInRegistries.ITEM.getKey(stack.getItem()).toString().equals(itemId)) {
                 return i;
             }
         }
         return -1;
     }
 
-    /** The player-side slot index of the first non-empty slot in the open container, or -1. */
+    /** The player-side slot index of the first non-empty slot in the open container, or -1. Skips equipped tools. */
     public int firstNonEmptyPlayerSlot() {
         LocalPlayer player = client().player;
         if (player == null || !isOpen()) {
             return -1;
         }
         AbstractContainerMenu menu = player.containerMenu;
+        Set<Integer> kept = keptSlots.get();
         for (int i = containerSlotCount(); i < menu.slots.size(); i++) {
-            if (!menu.getSlot(i).getItem().isEmpty()) {
+            Slot slot = menu.getSlot(i);
+            if (!slot.getItem().isEmpty() && !isKept(player, slot, kept)) {
                 return i;
             }
         }
@@ -223,10 +246,13 @@ public class ChestInteractor {
             return 0;
         }
         AbstractContainerMenu menu = player.containerMenu;
+        Set<Integer> kept = keptSlots.get();
         int stacks = 0;
         for (int i = containerSlotCount(); i < menu.slots.size(); i++) {
-            ItemStack stack = menu.getSlot(i).getItem();
-            if (!stack.isEmpty() && BuiltInRegistries.ITEM.getKey(stack.getItem()).toString().equals(itemId)) {
+            Slot slot = menu.getSlot(i);
+            ItemStack stack = slot.getItem();
+            if (!stack.isEmpty() && !isKept(player, slot, kept)
+                    && BuiltInRegistries.ITEM.getKey(stack.getItem()).toString().equals(itemId)) {
                 stacks++;
             }
         }
@@ -235,7 +261,8 @@ public class ChestInteractor {
 
     /**
      * Whether the bot is holding anything at all, read from its own inventory menu rather than an
-     * open container - the stop button needs to answer this with nothing open.
+     * open container - the stop button needs to answer this with nothing open. Equipped tools
+     * aren't cargo, so a bot holding only those counts as empty-handed.
      */
     public boolean hasCarriedItems() {
         LocalPlayer player = client().player;
@@ -243,9 +270,11 @@ public class ChestInteractor {
             return false;
         }
         AbstractContainerMenu menu = player.inventoryMenu;
+        Set<Integer> kept = keptSlots.get();
         int end = Math.min(menu.slots.size(), INVENTORY_MENU_MAIN_START + PLAYER_INVENTORY_SLOTS);
         for (int i = INVENTORY_MENU_MAIN_START; i < end; i++) {
-            if (!menu.getSlot(i).getItem().isEmpty()) {
+            Slot slot = menu.getSlot(i);
+            if (!slot.getItem().isEmpty() && !isKept(player, slot, kept)) {
                 return true;
             }
         }
@@ -265,11 +294,14 @@ public class ChestInteractor {
             return 0;
         }
         AbstractContainerMenu menu = player.containerMenu;
+        Set<Integer> kept = keptSlots.get();
         int containerCount = containerSlotCount();
         int total = 0;
         for (int i = containerCount; i < menu.slots.size(); i++) {
-            ItemStack stack = menu.getSlot(i).getItem();
-            if (!stack.isEmpty() && BuiltInRegistries.ITEM.getKey(stack.getItem()).toString().equals(itemId)) {
+            Slot slot = menu.getSlot(i);
+            ItemStack stack = slot.getItem();
+            if (!stack.isEmpty() && !isKept(player, slot, kept)
+                    && BuiltInRegistries.ITEM.getKey(stack.getItem()).toString().equals(itemId)) {
                 total += stack.getCount();
             }
         }

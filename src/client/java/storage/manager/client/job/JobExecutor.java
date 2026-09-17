@@ -5,18 +5,33 @@ import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.world.level.block.AbstractFurnaceBlock;
 import net.minecraft.world.level.block.BarrelBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.ChestBlock;
+import net.minecraft.world.level.block.CraftingTableBlock;
 import net.minecraft.world.level.block.ShulkerBoxBlock;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.ChestType;
+import net.minecraft.tags.BlockTags;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 
 import storage.manager.StorageManager;
 import storage.manager.client.baritone.BotNavigator;
+import storage.manager.client.gather.DropIndex;
+import storage.manager.client.gather.GatherPlanner;
 import storage.manager.client.interact.ChestInteractor;
+import storage.manager.client.interact.CraftingInteractor;
+import storage.manager.client.interact.FurnaceInteractor;
+import storage.manager.client.recipe.ChainPlanner;
+import storage.manager.client.recipe.CraftPlanner;
+import storage.manager.client.recipe.Recipe;
+import storage.manager.client.recipe.RecipeBook;
 import storage.manager.client.storage.StorageIndex;
+import storage.manager.client.tool.ToolKit;
 import storage.manager.client.web.WebServer;
 
 import java.util.ArrayDeque;
@@ -33,6 +48,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.ToIntFunction;
 import java.util.stream.Collectors;
 
 /**
@@ -45,30 +61,83 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
 
     private enum VisitKind {
         SCAN, WITHDRAW_ITEM, DEPOSIT_ITEM, DEPOSIT_BATCH, READ_INPUT,
-        DEPOSIT_TO_OUTPUT, SHUFFLE_CHEST, SHUFFLE_GRAB, SHUFFLE_DROP, DUMP_ALL
+        DEPOSIT_TO_OUTPUT, SHUFFLE_CHEST, SHUFFLE_GRAB, SHUFFLE_DROP, DUMP_ALL, CRAFT, SMELT, GATHER,
+        OBTAIN, PUT_AWAY
+    }
+
+    /**
+     * An OBTAIN visit's goal: {@code targets} (item to count) either to carry and equip
+     * ({@code equip}, the kit's tools) or to craft into storage. {@code rounds} counts plan-act
+     * cycles so far, {@code depth} how deeply this OBTAIN is nested inside a gather that needed a
+     * tool, and {@code lastGather} what the previous round set out to gather - the same shortfall
+     * again means that trip brought nothing back.
+     */
+    private record Obtain(Map<String, Integer> targets, boolean equip, int rounds, int depth,
+                          Map<String, Integer> lastGather) {
+        private Obtain next(Map<String, Integer> gathering) {
+            return new Obtain(targets, equip, rounds + 1, depth, gathering);
+        }
     }
 
     /**
      * {@code items} is empty for kinds that don't target one, holds a single entry for the
      * item-at-a-time kinds, and one entry per stack for DEPOSIT_BATCH. {@code slot} is -1 unless
-     * the visit targets one specific container slot (exact withdrawals).
+     * the visit targets one specific container slot (exact withdrawals). {@code crafts} is how many
+     * times a CRAFT or SMELT visit runs its recipe, and 0 for every other kind. A SMELT visit's
+     * {@code items} are the result then the fuel, and {@code fuelCount} is how much of that fuel
+     * to load.
+     *
+     * <p>Three kinds have no {@code pos}. GATHER - Baritone picks where to mine - carries its
+     * {@code gather} spec, with {@code crafts} how many items are still wanted and {@code fuelCount}
+     * how many times it has already re-equipped a tool that broke. OBTAIN carries an
+     * {@link Obtain} goal and is planned only once reached, so it sees what earlier steps brought
+     * back. PUT_AWAY likewise expands to deposits of whatever the bot carries by the time it's reached.
      */
-    private record Visit(BlockPos pos, VisitKind kind, List<String> items, List<BlockPos> triedChests, int slot) {
+    private record Visit(BlockPos pos, VisitKind kind, List<String> items, List<BlockPos> triedChests, int slot,
+                         int crafts, int fuelCount, GatherSpec gather, Obtain obtain) {
+
+        private Visit(BlockPos pos, VisitKind kind, List<String> items, List<BlockPos> triedChests, int slot,
+                      int crafts, int fuelCount) {
+            this(pos, kind, items, triedChests, slot, crafts, fuelCount, null, null);
+        }
 
         private Visit(BlockPos pos, VisitKind kind) {
-            this(pos, kind, List.of(), List.of(), -1);
+            this(pos, kind, List.of(), List.of(), -1, 0, 0);
         }
 
         private Visit(BlockPos pos, VisitKind kind, String item) {
-            this(pos, kind, List.of(item), List.of(), -1);
+            this(pos, kind, List.of(item), List.of(), -1, 0, 0);
         }
 
         private Visit(BlockPos pos, VisitKind kind, String item, int slot) {
-            this(pos, kind, List.of(item), List.of(), slot);
+            this(pos, kind, List.of(item), List.of(), slot, 0, 0);
         }
 
         private Visit(BlockPos pos, VisitKind kind, List<String> items, List<BlockPos> triedChests) {
-            this(pos, kind, items, triedChests, -1);
+            this(pos, kind, items, triedChests, -1, 0, 0);
+        }
+
+        private static Visit craft(BlockPos table, String item, int crafts) {
+            return new Visit(table, VisitKind.CRAFT, List.of(item), List.of(), -1, crafts, 0);
+        }
+
+        private static Visit smelt(BlockPos furnace, CraftPlanner.Step step) {
+            return new Visit(furnace, VisitKind.SMELT, List.of(step.item(), step.fuel()), List.of(), -1,
+                    step.crafts(), step.fuelCount());
+        }
+
+        private static Visit gather(GatherSpec spec, int wanted, int reequips) {
+            return new Visit(null, VisitKind.GATHER, List.of(spec.item()), List.of(), -1, wanted, reequips, spec, null);
+        }
+
+        private static Visit obtain(Obtain goal) {
+            return new Visit(null, VisitKind.OBTAIN, List.copyOf(goal.targets().keySet()), List.of(), -1, 0, 0,
+                    null, goal);
+        }
+
+        /** Equip one tool, made from scratch if it has to be. */
+        private static Visit obtainTool(String tool, int depth) {
+            return obtain(new Obtain(Map.of(tool, 1), true, 0, depth, null));
         }
 
         /** The single item this visit is about, for the kinds that only ever have one. */
@@ -77,9 +146,14 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
         }
     }
 
-    private enum Phase { PATHING, OPENING, ACTING }
+    private enum Phase { PATHING, OPENING, ACTING, GATHERING }
 
     private static final double ARRIVE_RANGE = 3.5;
+    /**
+     * How long a walk may go without getting any closer before it's abandoned. Measured from the
+     * last progress rather than the start, so the long walk home from a gathering trip isn't cut
+     * off just for being long.
+     */
     private static final long PATH_TIMEOUT_TICKS = 20L * 60;   // 60s
     private static final long OPEN_TIMEOUT_TICKS = 20L * 5;    // 5s
     private static final long ACTING_TIMEOUT_TICKS = 20L * 10; // 10s - guards the multi-tick loops
@@ -116,9 +190,26 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
     private static final long WANDER_START_GRACE_TICKS = 40L;
     private static final long WANDER_TIMEOUT_TICKS = 20L * 60;
 
+    /** Baritone needs a few ticks to scan for targets before an inactive mine means "none found". */
+    private static final long GATHER_START_GRACE_TICKS = 40L;
+    /** Mining with nothing picked up for this long means Baritone is wandering, not finding. */
+    private static final long GATHER_STALL_TICKS = 20L * 180; // 3min
+    /** A trip ends with this few free slots left, so pickups aren't dropped on the floor. */
+    private static final int GATHER_MIN_FREE_SLOTS = 1;
+    /** Tools a single GATHER job may wear out and replace before it stops. */
+    private static final int MAX_TOOL_REEQUIPS = 5;
+    /** Blocks around the storage region and configured blocks that gathering must never break. */
+    private static final int PROTECTED_MARGIN = 1;
+    /** Categories EQUIP_TOOLS fills. Hoes only matter for a few blocks, so gathering fetches one on demand. */
+    private static final List<ToolKit.Category> STANDARD_TOOLS =
+            List.of(ToolKit.Category.PICKAXE, ToolKit.Category.AXE, ToolKit.Category.SHOVEL);
+
     private final JobQueue queue;
     private final BotNavigator navigator = new BotNavigator();
     private final ChestInteractor interactor = new ChestInteractor();
+    private final CraftingInteractor craftingInteractor = new CraftingInteractor();
+    private final FurnaceInteractor furnaceInteractor = new FurnaceInteractor();
+    private final RecipeBook recipeBook = RecipeBook.load();
     private final StorageIndex index;
 
     /**
@@ -181,12 +272,17 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
     public JobExecutor(JobQueue queue, StorageIndex index) {
         this.queue = queue;
         this.index = index;
+        interactor.setKeptSlots(this::keptToolSlots);
     }
 
     public void pause() {
         if (!paused) {
             stopWandering();
             navigator.cancel();
+        }
+        if (gather != null) {
+            // Cancelling Baritone ended the mine - pick it back up once resumed.
+            gather.restart = true;
         }
         paused = true;
     }
@@ -211,23 +307,55 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
             botInventory = emptyBotInventory();
             return;
         }
+        Set<Integer> kept = keptToolSlots();
         List<WebServer.InventorySlot> snapshot = new ArrayList<>(36);
         for (int slot = 0; slot < 36; slot++) {
             ItemStack stack = player.getInventory().getItem(slot);
             snapshot.add(stack.isEmpty()
-                    ? new WebServer.InventorySlot(slot, null, 0)
+                    ? new WebServer.InventorySlot(slot, null, 0, false)
                     : new WebServer.InventorySlot(slot,
-                            BuiltInRegistries.ITEM.getKey(stack.getItem()).toString(), stack.getCount()));
+                            BuiltInRegistries.ITEM.getKey(stack.getItem()).toString(), stack.getCount(),
+                            kept.contains(slot)));
         }
         botInventory = List.copyOf(snapshot);
+    }
+
+    /** Whether the bot carries any of this item as cargo - equipped tools don't count. */
+    private boolean botHolds(String itemId) {
+        refreshBotInventory();
+        return botInventory.stream().anyMatch(slot -> itemId.equals(slot.item()) && !slot.kept());
+    }
+
+    /** Whether any slot at all, equipped or not, holds this item. */
+    private boolean botCarriesAny(String itemId) {
+        refreshBotInventory();
+        return botInventory.stream().anyMatch(slot -> itemId.equals(slot.item()));
     }
 
     private static List<WebServer.InventorySlot> emptyBotInventory() {
         List<WebServer.InventorySlot> empty = new ArrayList<>(36);
         for (int slot = 0; slot < 36; slot++) {
-            empty.add(new WebServer.InventorySlot(slot, null, 0));
+            empty.add(new WebServer.InventorySlot(slot, null, 0, false));
         }
         return List.copyOf(empty);
+    }
+
+    /** Player-inventory indices holding equipped tools - see {@link ToolKit#keptSlots}. */
+    private Set<Integer> keptToolSlots() {
+        LocalPlayer player = Minecraft.getInstance().player;
+        Map<String, String> equipped = index.getEquippedTools();
+        if (player == null || equipped.isEmpty()) {
+            return Set.of();
+        }
+        List<ToolKit.Held> held = new ArrayList<>();
+        for (int slot = 0; slot < 36; slot++) {
+            ItemStack stack = player.getInventory().getItem(slot);
+            if (!stack.isEmpty()) {
+                held.add(new ToolKit.Held(slot, BuiltInRegistries.ITEM.getKey(stack.getItem()).toString(),
+                        stack.getDamageValue()));
+            }
+        }
+        return ToolKit.keptSlots(equipped.values(), held);
     }
 
     /**
@@ -250,6 +378,10 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
         if (currentJob == null) {
             return "idle (" + queue.size() + " queued)" + (wandering ? " - wandering" : "");
         }
+        if (phase == Phase.GATHERING && currentVisit != null) {
+            int gained = gather != null ? gather.gained : 0;
+            return currentJob + " - GATHERING (" + gained + "/" + currentVisit.crafts() + " this trip)";
+        }
         return currentJob + " - " + phase + " (" + progress() + ")";
     }
 
@@ -269,14 +401,22 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
 
     private void warn(String message, Object... args) {
         StorageManager.LOGGER.warn(message, args);
-        // Use String.replace (literal, all occurrences) rather than replaceFirst, otherwise
-        // messages with more than one `{}` only substitute the first arg - the rest stay literal
-        // in `lastWarning`, which is what the web UI surfaces verbatim.
-        String formatted = message;
+        // Fill each `{}` with the next arg in order, like SLF4J. Done by index rather than
+        // String.replace (which fills every placeholder with the first arg) or replaceFirst (which
+        // treats `$`/`\` in the arg as regex replacement syntax). `lastWarning` is what the web UI
+        // surfaces verbatim.
+        StringBuilder formatted = new StringBuilder();
+        int from = 0;
         for (Object arg : args) {
-            formatted = formatted.replace("{}", String.valueOf(arg));
+            int at = message.indexOf("{}", from);
+            if (at < 0) {
+                break;
+            }
+            formatted.append(message, from, at).append(arg);
+            from = at + 2;
         }
-        lastWarning = formatted;
+        formatted.append(message, from, message.length());
+        lastWarning = formatted.toString();
     }
 
     public ReservedChests reservedChestPositions() {
@@ -340,6 +480,7 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
             case PATHING -> tickPathing();
             case OPENING -> tickOpening();
             case ACTING -> tickActing();
+            case GATHERING -> tickGather();
         }
     }
 
@@ -350,6 +491,15 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
     private void handleStop() {
         navigator.cancel();
         interactor.close();
+        craftingInteractor.close();
+        if (currentVisit != null && currentVisit.kind() == VisitKind.SMELT && furnaceInteractor.isOpen()) {
+            // A stopped smelt shouldn't leave its half-done batch in the furnace - pull input,
+            // fuel and output back out so the dump below puts them into storage.
+            furnaceInteractor.takeOut(FurnaceInteractor.RESULT_SLOT);
+            furnaceInteractor.takeOut(FurnaceInteractor.INPUT_SLOT);
+            furnaceInteractor.takeOut(FurnaceInteractor.FUEL_SLOT);
+            furnaceInteractor.close();
+        }
         stopWandering();
         queue.clear();
         currentScanner = null;
@@ -357,11 +507,15 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
         plan = null;
         currentVisit = null;
         shuffle = null;
+        craftsRemaining = -1;
+        smelt = null;
+        gather = null;
         randomizeRemaining = null;
         randomizeBatchDestinations = null;
         randomizeLeftovers = null;
         carried.clear();
         visitsDone = 0;
+        // Equipped tools don't count as carried, so a bot holding only its pickaxe stays put.
         if (!interactor.hasCarriedItems()) {
             return;
         }
@@ -499,8 +653,481 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
                     warn("Nowhere to dump the bot's inventory - no known chest has room");
                 }
             }
+            case CRAFT -> {
+                boolean fromStorage = recipeBook.recipesFor(job.itemId).isEmpty()
+                        || CraftPlanner.plan(recipeBook, storageCount(reservedChests()), job.itemId, job.count).possible();
+                if (fromStorage) {
+                    buildCraftPlan(plan, job); // also where "no recipe" gets reported
+                } else {
+                    // Short of something - gather it (and any tools that takes), then craft.
+                    plan.add(Visit.obtain(new Obtain(Map.of(job.itemId, job.count), false, 0, 0, null)));
+                }
+            }
+            case GATHER -> buildGatherPlan(plan, job);
+            case EQUIP_TOOLS -> {
+                boolean any = false;
+                for (ToolKit.Category category : STANDARD_TOOLS) {
+                    any |= planEquip(plan, category, 0, false, true) != null;
+                }
+                if (!any) {
+                    warn("No pickaxe, axe or shovel in storage to equip");
+                }
+            }
+            case KIT -> buildKitPlan(plan);
+            case STOW_TOOLS -> {
+                // Once unequipped the tools are ordinary cargo, so a plain dump puts them away.
+                index.clearEquippedTools();
+                BlockPos target = nearestChestWithRoom(List.of());
+                if (target != null) {
+                    plan.add(new Visit(target, VisitKind.DUMP_ALL));
+                } else if (interactor.hasCarriedItems()) {
+                    warn("Nowhere to put the bot's tools - no known chest has room");
+                }
+            }
         }
         return plan;
+    }
+
+    /**
+     * Debug loadout: a diamond tool of every kind, equipped whatever the bot had before. All five
+     * are one OBTAIN, so the chain is planned together - the diamonds for every tool, the sticks for
+     * every tool and the wooden-to-iron pickaxes on the way are each gathered in one go. Tools the
+     * kit replaced become cargo and go back to storage at the end.
+     */
+    private void buildKitPlan(Deque<Visit> plan) {
+        Map<String, Integer> tools = new LinkedHashMap<>();
+        for (ToolKit.Category category : KIT_ORDER) {
+            tools.put("minecraft:diamond_" + category.key(), 1);
+        }
+        plan.add(Visit.obtain(new Obtain(tools, true, 0, 0, null)));
+        plan.add(new Visit(null, VisitKind.PUT_AWAY));
+    }
+
+    private static final List<ToolKit.Category> KIT_ORDER = List.of(ToolKit.Category.PICKAXE,
+            ToolKit.Category.AXE, ToolKit.Category.SHOVEL, ToolKit.Category.SWORD, ToolKit.Category.HOE);
+
+    /**
+     * Plan-act cycles an OBTAIN may take. A diamond pickaxe from nothing is about ten - gather, craft
+     * a tool, gather with it, and so on up four tiers, then craft the targets - so this leaves room
+     * for trips that come back short.
+     */
+    private static final int MAX_OBTAIN_ROUNDS = 30;
+
+    /** How deeply a gather that needs a tool may start another OBTAIN for it. */
+    private static final int MAX_OBTAIN_DEPTH = 3;
+
+    /** What a GATHER visit mines, resolved when it's planned. */
+    private record GatherSpec(String item, List<Block> blocks, ToolKit.Category tool, int minHarvest,
+                              boolean toolRequired) {}
+
+    /** Plans a GATHER job - see {@link #gatherVisits}. */
+    private void buildGatherPlan(Deque<Visit> plan, Job job) {
+        List<Visit> visits = gatherVisits(job.itemId, job.count, 0);
+        if (visits != null) {
+            plan.addAll(visits);
+        }
+    }
+
+    /**
+     * What gathering {@code requested} involves: the item actually counted, the blocks that drop
+     * it, and the tool mining them takes. Null if no block drops it.
+     *
+     * <p>The tool comes from recipes.json's {@code requiresTool}/{@code minTier} when it says, and
+     * otherwise from the blocks' own mineable tags - an axe for logs, a shovel for sand. It's only
+     * {@code toolRequired} when the blocks drop nothing without one; logs just come slower by hand.
+     */
+    private GatherSpec resolveGather(String requested) {
+        GatherPlanner.Target target = GatherPlanner.resolve(recipeBook, dropIndex(), requested);
+        List<Block> blocks = new ArrayList<>();
+        for (String id : target.blocks()) {
+            ResourceLocation location = ResourceLocation.tryParse(id);
+            Block block = location == null ? null : BuiltInRegistries.BLOCK.getOptional(location).orElse(null);
+            if (block != null && !block.defaultBlockState().isAir()) {
+                blocks.add(block);
+            }
+        }
+        if (blocks.isEmpty()) {
+            return null;
+        }
+        ToolKit.Category tool = target.tool();
+        boolean required = tool != null;
+        int minHarvest = target.minHarvest();
+        for (Block block : blocks) {
+            BlockState state = block.defaultBlockState();
+            if (tool == null) {
+                tool = mineableWith(state);
+            }
+            required |= state.requiresCorrectToolForDrops();
+            minHarvest = Math.max(minHarvest, harvestLevelNeeded(state));
+        }
+        return new GatherSpec(target.item(), List.copyOf(blocks), tool, minHarvest, required && tool != null);
+    }
+
+    /**
+     * The visits that gather {@code count} of {@code requested}: make sure the bot has a suitable
+     * tool, then one GATHER visit that mines until the inventory fills or the count is reached.
+     * Each trip queues its own put-away and, if more is wanted, the next trip - see
+     * {@link #endGatherTrip}. Returns null, having warned, if it can't be gathered at all.
+     *
+     * <p>A block that only drops with a tool gets one: the best to hand or in storage, else a cheap
+     * one crafted, else an OBTAIN that works one up from raw materials. A block that drops anyway
+     * (logs) is mined bare-handed rather than starting a tool chain for it.
+     */
+    private List<Visit> gatherVisits(String requested, int count, int depth) {
+        GatherSpec spec = resolveGather(requested);
+        if (spec == null) {
+            warn("No block drops {} - gathering only covers what blocks drop, not mob drops", requested);
+            return null;
+        }
+        List<Visit> visits = new ArrayList<>();
+        if (spec.tool() != null) {
+            Deque<Visit> equip = new ArrayDeque<>();
+            if (planEquip(equip, spec.tool(), spec.minHarvest(), true, false) != null) {
+                visits.addAll(equip);
+            } else if (!spec.toolRequired()) {
+                warn("No {} to hand - gathering {} bare-handed", spec.tool().key(), spec.item());
+            } else if (depth < MAX_OBTAIN_DEPTH) {
+                visits.add(Visit.obtainTool(ToolKit.cheapestTool(spec.tool(), spec.minHarvest()), depth + 1));
+            } else {
+                warn("Gathering {} needs a {} that mines at {} level or better, and there's no way to get one",
+                        spec.item(), spec.tool().key(), tierName(spec.minHarvest()));
+                return null;
+            }
+        }
+        StorageManager.LOGGER.info("Gathering {}x {} from {}", count, spec.item(),
+                spec.blocks().stream().map(block -> BuiltInRegistries.BLOCK.getKey(block).toString()).toList());
+        visits.add(Visit.gather(spec, count, 0));
+        return visits;
+    }
+
+    /**
+     * Expands an OBTAIN into its next round, followed by another OBTAIN to re-plan once that round
+     * has run. Targets the bot already carries are equipped, and ones in storage withdrawn, before
+     * any planning. The rest go to {@link ChainPlanner}, which looks at the whole tree at once:
+     * <ul>
+     *   <li>GATHER - every raw material the bot can already mine, in the full amount the whole
+     *       remaining chain needs, so each material takes one trip rather than one per tool;</li>
+     *   <li>CRAFT a tool - when nothing more can be mined without it (a wooden pickaxe before any
+     *       cobblestone). It's equipped first so the craft's put-away leaves it with the bot;</li>
+     *   <li>CRAFT a target - once nothing is missing. A craft-mode OBTAIN ends there; an equip-mode
+     *       one re-plans, which finds the tool carried and moves on to the next.</li>
+     * </ul>
+     * Returns the visits to run next - empty when done, or given up with a warning.
+     */
+    private List<Visit> planObtain(Visit visit) {
+        Obtain goal = visit.obtain();
+        Map<String, Integer> targets = new LinkedHashMap<>(goal.targets());
+        Set<BlockPos> reserved = reservedChests();
+        List<Visit> next = new ArrayList<>();
+        if (goal.equip()) {
+            Iterator<Map.Entry<String, Integer>> it = targets.entrySet().iterator();
+            while (it.hasNext()) {
+                String tool = it.next().getKey();
+                ToolKit.Category category = ToolKit.categoryOf(tool);
+                if (category == null) {
+                    warn("Can't equip {} - not a tool", tool);
+                    it.remove();
+                    continue;
+                }
+                if (botCarriesAny(tool)) {
+                    index.setEquippedTool(category.key(), tool);
+                    it.remove();
+                    continue;
+                }
+                List<StorageIndex.Contribution> stored = index.findItem(tool, 1, reserved);
+                if (!stored.isEmpty()) {
+                    index.setEquippedTool(category.key(), tool);
+                    next.add(new Visit(stored.getFirst().chestPos(), VisitKind.WITHDRAW_ITEM, tool,
+                            stored.getFirst().slot()));
+                    it.remove();
+                }
+            }
+        }
+        if (targets.isEmpty()) {
+            return next;
+        }
+        if (goal.rounds() >= MAX_OBTAIN_ROUNDS) {
+            warn("Gave up getting {} after {} rounds", targets.keySet(), goal.rounds());
+            return next;
+        }
+
+        ChainPlanner.Step step = ChainPlanner.next(recipeBook, targets, chainWorld(reserved));
+        StorageManager.LOGGER.info("Getting {}: {} {} - chain still short of {}, tools on the way {}",
+                targets, step.action(), step.action() == ChainPlanner.Action.STUCK ? step.problem() : step.items(),
+                step.missing(), step.tools());
+        switch (step.action()) {
+            case DONE -> {
+                return next;
+            }
+            case STUCK -> {
+                warn("Can't get {} - {}", targets.keySet(), step.problem());
+                return next;
+            }
+            case GATHER -> {
+                if (step.missing().equals(goal.lastGather())) {
+                    warn("Gathering for {} brought nothing back - still short of {}", targets.keySet(), step.missing());
+                    return next;
+                }
+                for (Map.Entry<String, Integer> material : step.items().entrySet()) {
+                    List<Visit> gather = gatherVisits(material.getKey(), material.getValue(), goal.depth());
+                    if (gather == null) {
+                        return next;
+                    }
+                    next.addAll(gather);
+                }
+                next.add(Visit.obtain(goal.next(step.missing())));
+                return next;
+            }
+            case CRAFT -> {
+                Map.Entry<String, Integer> craft = step.items().entrySet().iterator().next();
+                String item = craft.getKey();
+                boolean finalCraft = !goal.equip() && targets.containsKey(item);
+                ToolKit.Category category = ToolKit.categoryOf(item);
+                if (category != null && !finalCraft) {
+                    index.setEquippedTool(category.key(), item);
+                }
+                Deque<Visit> steps = new ArrayDeque<>();
+                buildCraftPlan(steps, Job.craft(item, craft.getValue()));
+                if (steps.isEmpty()) {
+                    return next; // buildCraftPlan said why - no table, no furnace
+                }
+                next.addAll(steps);
+                if (!finalCraft) {
+                    next.add(Visit.obtain(goal.next(null)));
+                }
+                return next;
+            }
+        }
+        return next;
+    }
+
+    /** The planner's view of the game: storage counts, what mining takes, and the tools the bot can get at. */
+    private ChainPlanner.World chainWorld(Set<BlockPos> reserved) {
+        ToIntFunction<String> stock = storageCount(reserved);
+        return new ChainPlanner.World() {
+            @Override
+            public int stock(String item) {
+                return stock.applyAsInt(item);
+            }
+
+            @Override
+            public ChainPlanner.Requirement mineRequirement(String item) {
+                GatherSpec spec = resolveGather(item);
+                if (spec == null) {
+                    return null;
+                }
+                return spec.toolRequired()
+                        ? new ChainPlanner.Requirement(spec.tool(), spec.minHarvest())
+                        : ChainPlanner.Requirement.BARE_HANDS;
+            }
+
+            @Override
+            public boolean canMine(ChainPlanner.Requirement requirement) {
+                for (String tool : ToolKit.toolsBestFirst(requirement.tool())) {
+                    if (ToolKit.harvestLevel(tool) < requirement.minHarvest()) {
+                        return false;
+                    }
+                    if (botCarriesAny(tool) || !index.findItem(tool, 1, reserved).isEmpty()) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+        };
+    }
+
+    /** Built on the first GATHER rather than at startup - it reads a thousand-odd loot tables. */
+    private DropIndex dropIndex;
+
+    private DropIndex dropIndex() {
+        if (dropIndex == null) {
+            long start = System.currentTimeMillis();
+            List<String> blocks = BuiltInRegistries.BLOCK.keySet().stream().map(Object::toString).toList();
+            dropIndex = DropIndex.build(blocks, JobExecutor::readBlockLootTable);
+            StorageManager.LOGGER.info("Indexed block drops from {} loot tables in {}ms", blocks.size(),
+                    System.currentTimeMillis() - start);
+            if (dropIndex.isEmpty()) {
+                StorageManager.LOGGER.warn("No block loot tables readable - gathering falls back to recipes.json");
+            }
+        }
+        return dropIndex;
+    }
+
+    /** A block's vanilla loot table, off the game jar's built-in datapack, or null if it has none. */
+    private static String readBlockLootTable(String blockId) {
+        int colon = blockId.indexOf(':');
+        String path = "/data/" + blockId.substring(0, colon) + "/loot_table/blocks/" + blockId.substring(colon + 1) + ".json";
+        try (java.io.InputStream in = Block.class.getResourceAsStream(path)) {
+            return in == null ? null : new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (java.io.IOException e) {
+            return null;
+        }
+    }
+
+    private static ToolKit.Category mineableWith(BlockState state) {
+        if (state.is(BlockTags.MINEABLE_WITH_PICKAXE)) {
+            return ToolKit.Category.PICKAXE;
+        }
+        if (state.is(BlockTags.MINEABLE_WITH_AXE)) {
+            return ToolKit.Category.AXE;
+        }
+        if (state.is(BlockTags.MINEABLE_WITH_SHOVEL)) {
+            return ToolKit.Category.SHOVEL;
+        }
+        if (state.is(BlockTags.MINEABLE_WITH_HOE)) {
+            return ToolKit.Category.HOE;
+        }
+        return null;
+    }
+
+    private static int harvestLevelNeeded(BlockState state) {
+        if (state.is(BlockTags.NEEDS_DIAMOND_TOOL)) {
+            return 3;
+        }
+        if (state.is(BlockTags.NEEDS_IRON_TOOL)) {
+            return 2;
+        }
+        return state.is(BlockTags.NEEDS_STONE_TOOL) ? 1 : 0;
+    }
+
+    private static String tierName(int harvestLevel) {
+        return switch (harvestLevel) {
+            case 0 -> "wood";
+            case 1 -> "stone";
+            case 2 -> "iron";
+            default -> "diamond";
+        };
+    }
+
+    /**
+     * Makes sure the bot will have a {@code category} tool that mines at {@code minHarvest} or
+     * better, equipping it and appending whatever visits fetching it takes. Returns the equipped
+     * id, or null if there's no such tool to be had.
+     *
+     * <p>Unless {@code upgrade} is set, a suitable tool already equipped and carried is kept -
+     * gathering shouldn't send the bot back to storage just because a better pickaxe exists.
+     * Otherwise the best tool wins, whether the bot is already carrying it or it's in storage. Only
+     * when neither has one (and {@code allowCraft}) is one crafted, choosing a cheap durable tier
+     * rather than burning diamonds on an axe.
+     *
+     * <p>The tool is equipped at plan time, before it's fetched. That's harmless - an equipped id
+     * the bot doesn't carry protects nothing - and it's what keeps a crafted tool from being put
+     * away by the craft's own put-away visits.
+     */
+    private String planEquip(Deque<Visit> plan, ToolKit.Category category, int minHarvest,
+                             boolean allowCraft, boolean upgrade) {
+        String current = index.getEquippedTools().get(category.key());
+        if (!upgrade && current != null && botCarriesAny(current) && ToolKit.harvestLevel(current) >= minHarvest) {
+            return current;
+        }
+        Set<BlockPos> reserved = reservedChests();
+        for (String candidate : ToolKit.toolsBestFirst(category)) {
+            if (ToolKit.harvestLevel(candidate) < minHarvest) {
+                break; // best-first, so everything after this is weaker too
+            }
+            if (botCarriesAny(candidate)) {
+                index.setEquippedTool(category.key(), candidate);
+                return candidate;
+            }
+            List<StorageIndex.Contribution> stored = index.findItem(candidate, 1, reserved);
+            if (!stored.isEmpty()) {
+                index.setEquippedTool(category.key(), candidate);
+                plan.add(new Visit(stored.getFirst().chestPos(), VisitKind.WITHDRAW_ITEM, candidate,
+                        stored.getFirst().slot()));
+                return candidate;
+            }
+        }
+        if (!allowCraft) {
+            return null;
+        }
+        for (String candidate : ToolKit.craftCandidates(category, minHarvest)) {
+            if (canCraft(candidate)) {
+                index.setEquippedTool(category.key(), candidate);
+                buildCraftPlan(plan, Job.craft(candidate, 1));
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    /** Whether a CRAFT of one {@code itemId} would go ahead right now, without warning if not. */
+    private boolean canCraft(String itemId) {
+        if (recipeBook.recipesFor(itemId).isEmpty()) {
+            return false;
+        }
+        CraftPlanner.Plan craft = CraftPlanner.plan(recipeBook, storageCount(reservedChests()), itemId, 1);
+        return craft.possible()
+                && (!craft.needsCraftingTable() || index.getCraftingTable() != null)
+                && (!craft.needsFurnace() || index.getFurnace() != null);
+    }
+
+    private ToIntFunction<String> storageCount(Set<BlockPos> reserved) {
+        return item -> index.findItem(item, Integer.MAX_VALUE, reserved).stream()
+                .mapToInt(StorageIndex.Contribution::count).sum();
+    }
+
+    /**
+     * Plans a CRAFT job. {@link CraftPlanner} decides, ingredient by ingredient, whether storage
+     * already has enough or the shortfall has to be crafted first (sticks from planks, planks from
+     * logs, ...). The bot then pulls every raw ingredient in one sweep, runs each craft at the
+     * configured table in dependency order, and puts the result - plus any leftovers - away.
+     * Bails out (leaving {@code plan} empty) rather than attempting a partial craft if anything
+     * in the chain can't be sourced or no table is configured.
+     */
+    private void buildCraftPlan(Deque<Visit> plan, Job job) {
+        if (recipeBook.recipesFor(job.itemId).isEmpty()) {
+            warn("No known recipe for {} - add one to recipes.json", job.itemId);
+            return;
+        }
+        Set<BlockPos> reserved = reservedChests();
+        CraftPlanner.Plan craft = CraftPlanner.plan(recipeBook, storageCount(reserved), job.itemId, job.count);
+        if (!craft.possible()) {
+            String missing = craft.missing().entrySet().stream()
+                    .map(e -> e.getValue() + "x " + e.getKey())
+                    .collect(Collectors.joining(", "));
+            warn("Can't craft {}x {} - not enough in storage, short: {}", job.count, job.itemId, missing);
+            return;
+        }
+        BlockPos table = index.getCraftingTable();
+        if (craft.needsCraftingTable() && table == null) {
+            warn("No crafting table configured - set one in the Setup panel");
+            return;
+        }
+        BlockPos furnace = index.getFurnace();
+        if (craft.needsFurnace() && furnace == null) {
+            warn("{} needs smelting but no furnace is configured - set one in the Setup panel", job.itemId);
+            return;
+        }
+        StorageManager.LOGGER.info("Crafting {}x {}: withdraw {}, then {}", job.count, job.itemId,
+                craft.withdrawals(), craft.steps().stream()
+                        .map(step -> (step.smelt() ? "smelt " : "craft ") + step.crafts() + "x " + step.item())
+                        .collect(Collectors.joining(" -> ")));
+        Set<String> touched = new LinkedHashSet<>();
+        for (Map.Entry<String, Integer> withdrawal : craft.withdrawals().entrySet()) {
+            for (StorageIndex.Contribution c : index.findItem(withdrawal.getKey(), withdrawal.getValue(), reserved)) {
+                plan.add(new Visit(c.chestPos(), VisitKind.WITHDRAW_ITEM, withdrawal.getKey(), c.slot()));
+            }
+            touched.add(withdrawal.getKey());
+        }
+        for (CraftPlanner.Step step : craft.steps()) {
+            plan.add(step.smelt() ? Visit.smelt(furnace, step) : Visit.craft(table, step.item(), step.crafts()));
+            touched.add(step.item());
+        }
+        // The result first, then anything left over: whole stacks get withdrawn even when only a
+        // few items were needed, and a craft can make more than it used (4 sticks when 2 were
+        // needed). Deposits of items the bot turns out not to hold are skipped in advanceVisit.
+        touched.remove(job.itemId);
+        List<String> putAway = new ArrayList<>();
+        putAway.add(job.itemId);
+        putAway.addAll(touched);
+        for (String item : putAway) {
+            BlockPos destination = index.depositCandidates(item, reserved).stream().findFirst().orElse(null);
+            if (destination != null) {
+                plan.add(new Visit(destination, VisitKind.DEPOSIT_ITEM, item));
+            } else if (item.equals(job.itemId)) {
+                warn("No storage chest to deposit crafted {} into - it'll stay in the bot's inventory", item);
+            }
+        }
     }
 
     /**
@@ -635,6 +1262,23 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
         return block instanceof ChestBlock || block instanceof BarrelBlock || block instanceof ShulkerBoxBlock;
     }
 
+    private boolean isCraftingTableBlock(BlockPos pos) {
+        ClientLevel world = Minecraft.getInstance().level;
+        if (world == null) {
+            return true; // can't verify right now - don't falsely bail on a real table
+        }
+        return world.getBlockState(pos).getBlock() instanceof CraftingTableBlock;
+    }
+
+    /** Furnace, blast furnace or smoker - they share one menu, so the interactor handles all three. */
+    private boolean isFurnaceBlock(BlockPos pos) {
+        ClientLevel world = Minecraft.getInstance().level;
+        if (world == null) {
+            return false;
+        }
+        return world.getBlockState(pos).getBlock() instanceof AbstractFurnaceBlock;
+    }
+
     /** Free slots according to the index. A chest never opened is assumed to be an empty single. */
     private static int freeSlots(StorageIndex.ChestEntry chest) {
         int size = chest.size > 0 ? chest.size : ASSUMED_CHEST_SIZE;
@@ -690,9 +1334,32 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
             visitsDone++;
             phaseTicks = 0;
             shuffle = null;
+            craftsRemaining = -1;
+            smelt = null;
+            gather = null;
+            if (currentVisit.kind() == VisitKind.DEPOSIT_ITEM && !botHolds(currentVisit.item())) {
+                // A leftover put-away planned before the craft ran - nothing was left over after all.
+                continue;
+            }
+            if (currentVisit.kind() == VisitKind.OBTAIN || currentVisit.kind() == VisitKind.PUT_AWAY) {
+                // Planning placeholders: expand into real visits now that earlier steps have run.
+                List<Visit> steps = currentVisit.kind() == VisitKind.OBTAIN
+                        ? planObtain(currentVisit) : putAwayVisits();
+                for (int i = steps.size() - 1; i >= 0; i--) {
+                    plan.addFirst(steps.get(i));
+                }
+                visitsDone--;
+                continue;
+            }
+            if (currentVisit.kind() == VisitKind.GATHER) {
+                navigator.cancel();
+                phase = Phase.GATHERING;
+                return true;
+            }
             if (!navigator.hasArrived(currentVisit.pos(), ARRIVE_RANGE)) {
                 navigator.goTo(currentVisit.pos());
                 phase = Phase.PATHING;
+                pathClosest = Double.MAX_VALUE;
                 return true;
             }
             if (openCurrentVisit()) {
@@ -714,18 +1381,35 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
         // sneak override used for edge safety, which makes right-click try to place a held
         // item instead of opening the container.
         navigator.cancel();
-        if (!isContainerBlock(currentVisit.pos())) {
-            // Whatever was here got broken/moved since the last scan - drop it from the index
-            // instead of trying (and timing out) forever on a chest that no longer exists.
-            warn("No container at {} anymore, removing from index", currentVisit.pos());
-            index.removeChest(currentVisit.pos());
-            return false;
+        if (currentVisit.kind() == VisitKind.CRAFT) {
+            if (!isCraftingTableBlock(currentVisit.pos())) {
+                warn("No crafting table at {} anymore - check the Setup panel", currentVisit.pos());
+                return false;
+            }
+            craftingInteractor.open(currentVisit.pos());
+        } else if (currentVisit.kind() == VisitKind.SMELT) {
+            if (!isFurnaceBlock(currentVisit.pos())) {
+                warn("No furnace at {} anymore - check the Setup panel", currentVisit.pos());
+                return false;
+            }
+            furnaceInteractor.open(currentVisit.pos());
+        } else {
+            if (!isContainerBlock(currentVisit.pos())) {
+                // Whatever was here got broken/moved since the last scan - drop it from the index
+                // instead of trying (and timing out) forever on a chest that no longer exists.
+                warn("No container at {} anymore, removing from index", currentVisit.pos());
+                index.removeChest(currentVisit.pos());
+                return false;
+            }
+            interactor.open(currentVisit.pos());
         }
-        interactor.open(currentVisit.pos());
         phase = Phase.OPENING;
         phaseTicks = 0;
         return true;
     }
+
+    /** Closest the current walk has come to its target, in blocks - progress resets the timeout. */
+    private double pathClosest = Double.MAX_VALUE;
 
     private void tickPathing() {
         phaseTicks++;
@@ -734,6 +1418,14 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
                 nextVisitOrFinish();
             }
             return;
+        }
+        LocalPlayer player = Minecraft.getInstance().player;
+        if (player != null) {
+            double distance = Math.sqrt(player.blockPosition().distSqr(currentVisit.pos()));
+            if (distance < pathClosest - 1) {
+                pathClosest = distance;
+                phaseTicks = 0;
+            }
         }
         if (!navigator.isBusy()) {
             // Path finished (or failed) short of the goal - try once more before giving up.
@@ -748,7 +1440,12 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
 
     private void tickOpening() {
         phaseTicks++;
-        if (interactor.isOpen()) {
+        boolean craftVisit = currentVisit.kind() == VisitKind.CRAFT;
+        boolean smeltVisit = currentVisit.kind() == VisitKind.SMELT;
+        boolean open = craftVisit ? craftingInteractor.isOpen()
+                : smeltVisit ? furnaceInteractor.isOpen()
+                : interactor.isOpen();
+        if (open) {
             phase = Phase.ACTING;
             phaseTicks = 0;
             return;
@@ -757,10 +1454,17 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
         // than only trying once and waiting out the full timeout. Every 4 ticks (5/s, about as
         // fast as a person clicks) rather than every 10, so a dropped open costs 200ms not 500ms.
         if (phaseTicks % 4 == 0) {
-            interactor.open(currentVisit.pos());
+            if (craftVisit) {
+                craftingInteractor.open(currentVisit.pos());
+            } else if (smeltVisit) {
+                furnaceInteractor.open(currentVisit.pos());
+            } else {
+                interactor.open(currentVisit.pos());
+            }
         }
         if (phaseTicks > OPEN_TIMEOUT_TICKS) {
-            warn("Chest at {} never opened, skipping", currentVisit.pos());
+            warn("{} at {} never opened, skipping",
+                    craftVisit ? "Crafting table" : smeltVisit ? "Furnace" : "Chest", currentVisit.pos());
             nextVisitOrFinish();
         }
     }
@@ -809,6 +1513,8 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
                 }
             }
             case READ_INPUT -> tickReadInput();
+            case CRAFT -> tickCraft();
+            case SMELT -> tickSmelt();
         }
     }
 
@@ -957,6 +1663,12 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
     private ShuffleState shuffle;
 
     /**
+     * Crafts still owed on the current CRAFT visit. -1 means "not yet started" - the first
+     * {@link #tickCraft()} call copies it from the visit's planned {@code crafts}.
+     */
+    private int craftsRemaining = -1;
+
+    /**
      * Per-job state for {@link #tickShuffleGrab()} / {@link #tickShuffleDrop()}. {@code remaining}
      * is the in-memory "finished" tracker built once at job start from a snapshot of every visited
      * chest - one entry per stack, decremented when that stack is deposited somewhere new.
@@ -969,7 +1681,10 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
     private Set<BlockPos> randomizeBatchDestinations;
     private List<String> randomizeLeftovers;
 
-    /** How many stacks a SHUFFLE_GRAB visit tries to pull per batch (one hotbar's worth). */
+    /**
+     * Max inventory slots a SHUFFLE_GRAB visit picks up per batch (one hotbar's worth) - slots,
+     * not item counts, and every slot taken counts toward it.
+     */
     private static final int RANDOMIZE_BATCH_SIZE = 9;
 
     /**
@@ -1149,11 +1864,11 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
     }
 
     /**
-     * SHUFFLE_GRAB visit: pull up to RANDOMIZE_BATCH_SIZE stacks from this chest's contents,
+     * SHUFFLE_GRAB visit: pull up to RANDOMIZE_BATCH_SIZE slots from this chest's contents,
      * skipping slots whose item has already hit zero in the remaining tracker (those are surplus
-     * from earlier batches and would just clutter the inventory). For each stack pulled, plan a
-     * SHUFFLE_DROP visit against a destination chosen NOW (while we still know the index state
-     * before this batch mutates it), then queue it.
+     * from earlier batches and would just clutter the inventory) and slots with no valid
+     * destination (those stay put). Each slot pulled gets a SHUFFLE_DROP visit against the
+     * destination chosen just before taking it.
      */
     private void tickShuffleGrab() {
         BlockPos pos = currentVisit.pos();
@@ -1176,22 +1891,21 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
             if (remaining == null || remaining <= 0) {
                 continue;
             }
+            // Pick the destination BEFORE taking the slot, so a slot with nowhere to go stays in
+            // the chest instead of being picked up uncounted - that's how a chest of pickaxes used
+            // to fill the whole inventory. Re-validated against the live container on arrival -
+            // that's the SHUFFLE_DROP visit's job - so a chest that fills up in between gets caught.
+            BlockPos destination = pickRandomizeDropDestination(slot.item, pos, List.of());
+            if (destination == null) {
+                continue;
+            }
             interactor.quickMove(slot.slot);
             // Confirm the move landed - same defensive check shuffleRound uses, since quickMove
             // is fire-and-forget client-side and the server can reject silently.
             if (heldInChest.contains(interactor.containerItemAt(slot.slot))) {
                 continue;
             }
-            // Pick the destination NOW so the SHUFFLE_DROP visit has a real pos to path to.
-            // Re-validate against the live container on arrival - that's the SHUFFLE_DROP visit's
-            // job - so a chest that filled up between grab and drop gets rejected there.
-            BlockPos destination = pickRandomizeDropDestination(slot.item, pos, List.of());
-            if (destination == null) {
-                // Couldn't find any destination even at planning time. Park it for the drain pass.
-                randomizeLeftovers.add(slot.item);
-                continue;
-            }
-            // Reserve the destination so the next stack in this batch doesn't pick the same one.
+            // Reserve the destination so the next slot in this batch doesn't pick the same one.
             randomizeBatchDestinations.add(destination);
             plan.add(new Visit(destination, VisitKind.SHUFFLE_DROP, slot.item));
             pulled++;
@@ -1488,6 +2202,456 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
     }
 
 /**
+     * CRAFT visit: fills the crafting grid from the recipe and collects the result, repeating
+     * until {@link #craftsRemaining} reaches zero or ingredients run out. Each cycle only ever
+     * places one item per grid cell (see {@link CraftingInteractor#placeIngredient}), so one
+     * quick-move on the result slot drains exactly one batch - {@link #craftsRemaining} is what
+     * carries the job's requested count across as many cycles/ticks as it takes.
+     */
+    private void tickCraft() {
+        Recipe recipe = recipeBook.craftFor(currentVisit.item());
+        if (recipe == null) {
+            // buildCraftPlan already validated this recipe exists - only reachable if
+            // recipes.json changed mid-job, which never happens today. Bail rather than NPE.
+            warn("Recipe for {} vanished mid-job", currentVisit.item());
+            finishVisit();
+            return;
+        }
+        if (craftsRemaining < 0) {
+            craftsRemaining = currentVisit.crafts();
+        }
+        if (craftsRemaining <= 0) {
+            finishVisit();
+            return;
+        }
+        if (phaseTicks > ACTING_TIMEOUT_TICKS) {
+            warn("Timed out crafting {}, {} batch(es) short", currentVisit.item(), craftsRemaining);
+            craftingInteractor.clearGrid();
+            finishVisit();
+            return;
+        }
+        boolean placedAll = true;
+        if (recipe.shaped && recipe.shape != null) {
+            for (Recipe.ShapeEntry cell : recipe.shape) {
+                int slot = CraftingInteractor.gridSlot(cell.x, cell.y);
+                if (craftingInteractor.gridItemAt(slot) == null) {
+                    placedAll &= craftingInteractor.placeIngredient(slot, cell.item);
+                }
+            }
+        } else if (!recipe.shaped && recipe.ingredients != null) {
+            int i = 0;
+            for (String item : recipe.ingredients) {
+                int slot = CraftingInteractor.gridSlot(i % 3, i / 3);
+                if (craftingInteractor.gridItemAt(slot) == null) {
+                    placedAll &= craftingInteractor.placeIngredient(slot, item);
+                }
+                i++;
+            }
+        }
+        if (!placedAll) {
+            warn("Ran out of ingredients crafting {} - {} batch(es) short", currentVisit.item(), craftsRemaining);
+            craftingInteractor.clearGrid();
+            finishVisit();
+            return;
+        }
+        if (craftingInteractor.hasResult()) {
+            craftingInteractor.collectResult();
+            craftsRemaining--;
+            // The timeout guards against a stuck grid, not a long run - a chain needing dozens of
+            // batches would otherwise hit 10s partway through while still making progress.
+            phaseTicks = 0;
+        }
+    }
+
+    /**
+     * A vanilla furnace takes 10s an item, so this is a furnace that has stopped working - wrong
+     * block type for the recipe (a smoker won't take raw iron), or something jammed - rather than
+     * a slow one.
+     */
+    private static final long SMELT_STALL_TICKS = 20L * 25;
+
+    /**
+     * How long the furnace may sit unlit with input and nothing to burn before it counts as out of
+     * fuel. A couple of seconds rather than one tick, so a fuel slot that just emptied as the next
+     * item lights isn't mistaken for a dead furnace.
+     */
+    private static final long SMELT_UNFUELLED_TICKS = 40L;
+
+    /** Per-visit state for {@link #tickSmelt()}, which keeps a visit open for as long as the batch takes. */
+    private static final class SmeltState {
+        int inputPlaced;
+        int fuelPlaced;
+        int collected;
+        int lastInputCount = -1;
+        long stalledTicks;
+        long unfuelledTicks;
+    }
+
+    private SmeltState smelt;
+
+    /**
+     * SMELT visit: loads the planned input and fuel, then stays at the open furnace taking the
+     * output as it appears until the whole batch is out. The bot waits rather than wandering off
+     * because every later step in the chain is waiting on these items anyway.
+     *
+     * <p>Leaves early - pulling input, output and fuel back into the inventory so the put-away
+     * visits return them to storage - if the furnace runs out of fuel, stalls, or the bot's
+     * inventory fills up.
+     */
+    private void tickSmelt() {
+        Recipe recipe = recipeBook.smeltFor(currentVisit.item());
+        if (recipe == null) {
+            warn("Recipe for {} vanished mid-job", currentVisit.item());
+            finishVisit();
+            return;
+        }
+        if (!furnaceInteractor.isOpen()) {
+            // Something closed the screen mid-batch. The progress so far is kept - reopen and resume.
+            furnaceInteractor.open(currentVisit.pos());
+            phase = Phase.OPENING;
+            phaseTicks = 0;
+            return;
+        }
+        String result = currentVisit.item();
+        String input = recipe.input;
+        String fuel = currentVisit.items().get(1);
+        int runs = currentVisit.crafts();
+        int wanted = runs * Math.max(1, recipe.resultCount);
+
+        if (smelt == null) {
+            String inSlot = furnaceInteractor.itemAt(FurnaceInteractor.INPUT_SLOT);
+            String outSlot = furnaceInteractor.itemAt(FurnaceInteractor.RESULT_SLOT);
+            if ((inSlot != null && !inSlot.equals(input)) || (outSlot != null && !outSlot.equals(result))) {
+                warn("Furnace at {} already has {} in it - empty it and try again", currentVisit.pos(),
+                        inSlot != null && !inSlot.equals(input) ? inSlot : outSlot);
+                finishVisit();
+                return;
+            }
+            // Output left over from before isn't this batch's: take it now, uncounted, so the full
+            // batch still goes in. It ends up in storage with the rest of the put-away.
+            furnaceInteractor.takeOut(FurnaceInteractor.RESULT_SLOT);
+            smelt = new SmeltState();
+        }
+
+        boolean progressed = false;
+        if (smelt.inputPlaced < runs) {
+            int placed = furnaceInteractor.place(FurnaceInteractor.INPUT_SLOT, input,
+                    runs - smelt.inputPlaced, MOVES_PER_TICK);
+            smelt.inputPlaced += placed;
+            progressed |= placed > 0;
+        }
+        if (fuel != null && smelt.fuelPlaced < currentVisit.fuelCount()) {
+            int placed = furnaceInteractor.place(FurnaceInteractor.FUEL_SLOT, fuel,
+                    currentVisit.fuelCount() - smelt.fuelPlaced, MOVES_PER_TICK);
+            smelt.fuelPlaced += placed;
+            progressed |= placed > 0;
+        }
+        if (furnaceInteractor.itemAt(FurnaceInteractor.RESULT_SLOT) != null) {
+            int before = furnaceInteractor.countPlayerItems(result);
+            furnaceInteractor.takeOut(FurnaceInteractor.RESULT_SLOT);
+            int got = furnaceInteractor.countPlayerItems(result) - before;
+            if (got <= 0) {
+                warn("Bot's inventory is full - couldn't take {} out of the furnace", result);
+                endSmelt();
+                return;
+            }
+            smelt.collected += got;
+            progressed = true;
+        }
+        if (smelt.collected >= wanted) {
+            endSmelt();
+            return;
+        }
+
+        int inputCount = furnaceInteractor.countAt(FurnaceInteractor.INPUT_SLOT);
+        if (inputCount != smelt.lastInputCount) {
+            smelt.lastInputCount = inputCount;
+            progressed = true;
+        }
+        boolean moreInput = inputCount > 0
+                || (smelt.inputPlaced < runs && furnaceInteractor.countPlayerItems(input) > 0);
+        if (!moreInput) {
+            warn("Only smelted {} of {} {} - ran out of {}", smelt.collected, wanted, result, input);
+            endSmelt();
+            return;
+        }
+        boolean moreFuel = furnaceInteractor.isLit()
+                || furnaceInteractor.itemAt(FurnaceInteractor.FUEL_SLOT) != null
+                || (fuel != null && smelt.fuelPlaced < currentVisit.fuelCount()
+                        && furnaceInteractor.countPlayerItems(fuel) > 0);
+        smelt.unfuelledTicks = moreFuel ? 0 : smelt.unfuelledTicks + 1;
+        if (smelt.unfuelledTicks > SMELT_UNFUELLED_TICKS) {
+            warn("Furnace ran out of fuel - smelted {} of {} {}", smelt.collected, wanted, result);
+            endSmelt();
+            return;
+        }
+        smelt.stalledTicks = progressed ? 0 : smelt.stalledTicks + 1;
+        if (smelt.stalledTicks > SMELT_STALL_TICKS) {
+            warn("Furnace at {} stopped smelting {} ({} of {} done) - is it the right kind of furnace?",
+                    currentVisit.pos(), input, smelt.collected, wanted);
+            endSmelt();
+        }
+    }
+
+    /**
+     * Empties whatever this batch left in the furnace back into the bot's inventory - unsmelted
+     * input on an early exit, and spare fuel either way - then moves on.
+     */
+    private void endSmelt() {
+        furnaceInteractor.takeOut(FurnaceInteractor.RESULT_SLOT);
+        furnaceInteractor.takeOut(FurnaceInteractor.INPUT_SLOT);
+        String fuel = currentVisit.items().get(1);
+        if (fuel != null && fuel.equals(furnaceInteractor.itemAt(FurnaceInteractor.FUEL_SLOT))) {
+            furnaceInteractor.takeOut(FurnaceInteractor.FUEL_SLOT);
+        }
+        finishVisit();
+    }
+
+    /** Per-trip state for {@link #tickGather()}. */
+    private static final class GatherState {
+        /** Items of the target picked up this trip. Only ever counts up - see {@link #tickGather()}. */
+        int gained;
+        int lastCount;
+        long ticks;
+        long sinceProgress;
+        /** Set when Baritone's mine needs (re)issuing: at the start, and after a pause cancelled it. */
+        boolean restart = true;
+        /** Whether the trip set out with its tool, so a tool that goes missing reads as broken. */
+        boolean hadTool;
+    }
+
+    private GatherState gather;
+
+    /**
+     * GATHER visit: Baritone mines while this watches what the bot picks up. The trip ends when
+     * the count is reached, the inventory is nearly full, the tool breaks, or Baritone runs out of
+     * blocks to find - and immediately, before a second block goes, if Baritone starts breaking
+     * something in or around the storage room.
+     *
+     * <p>Progress is counted as increases in the target item only. Baritone places cobblestone and
+     * dirt as scaffolding, so the raw count can drop mid-trip; subtracting those would have the bot
+     * gathering the same cobblestone twice.
+     */
+    private void tickGather() {
+        GatherSpec spec = currentVisit.gather();
+        String item = currentVisit.item();
+        int wanted = currentVisit.crafts();
+        if (gather == null) {
+            gather = new GatherState();
+            gather.lastCount = inventoryCount(item);
+            gather.hadTool = spec.tool() != null && equippedToolCarried(spec.tool());
+            if (spec.toolRequired() && !gather.hadTool) {
+                // The fetch planned for it didn't deliver - chest gone, craft short of something.
+                warn("Didn't get a {} to gather {} with - stopping", spec.tool().key(), item);
+                finishVisit();
+                return;
+            }
+            if (freeInventorySlots() <= GATHER_MIN_FREE_SLOTS) {
+                warn("Bot's inventory is still full - storage had no room for the last load, so not gathering more {}",
+                        item);
+                finishVisit();
+                return;
+            }
+        }
+        if (gather.restart) {
+            navigator.mine(spec.blocks());
+            gather.restart = false;
+            gather.ticks = 0;
+        }
+        gather.ticks++;
+
+        int count = inventoryCount(item);
+        if (count > gather.lastCount) {
+            gather.gained += count - gather.lastCount;
+            gather.sinceProgress = 0;
+        } else {
+            gather.sinceProgress++;
+        }
+        gather.lastCount = count;
+
+        BlockPos breaking = blockBeingBroken();
+        if (breaking != null && isProtected(breaking)) {
+            warn("Stopped gathering {} - Baritone started breaking a block at {}, inside the storage area",
+                    item, breaking);
+            endGatherTrip(false, false);
+            return;
+        }
+        if (gather.gained >= wanted) {
+            endGatherTrip(false, false);
+            return;
+        }
+        if (freeInventorySlots() <= GATHER_MIN_FREE_SLOTS) {
+            endGatherTrip(true, false);
+            return;
+        }
+        if (gather.hadTool && !equippedToolCarried(spec.tool())) {
+            index.setEquippedTool(spec.tool().key(), null);
+            if (currentVisit.fuelCount() >= MAX_TOOL_REEQUIPS) {
+                warn("Wore out {} tools gathering {} - stopping with {} still to get",
+                        MAX_TOOL_REEQUIPS, item, wanted - gather.gained);
+                endGatherTrip(false, false);
+            } else {
+                endGatherTrip(true, true);
+            }
+            return;
+        }
+        if (gather.ticks > GATHER_START_GRACE_TICKS && !navigator.isMining()) {
+            warn("Baritone can't find any more blocks for {} - stopping with {} still to get",
+                    item, wanted - gather.gained);
+            endGatherTrip(false, false);
+            return;
+        }
+        if (gather.sinceProgress > GATHER_STALL_TICKS) {
+            warn("Picked up no {} in {} minutes - stopping with {} still to get",
+                    item, GATHER_STALL_TICKS / 1200, wanted - gather.gained);
+            endGatherTrip(false, false);
+        }
+    }
+
+    /**
+     * Ends a gathering trip: stop mining, put away everything the bot is carrying other than its
+     * tools, and if {@code again}, queue the next trip for whatever is still wanted - preceded by
+     * fetching a replacement tool when {@code reequip}.
+     */
+    private void endGatherTrip(boolean again, boolean reequip) {
+        navigator.cancel();
+        GatherSpec spec = currentVisit.gather();
+        int remaining = currentVisit.crafts() - gather.gained;
+        gather = null;
+        List<Visit> next = new ArrayList<>(putAwayVisits());
+        if (again && remaining > 0) {
+            int reequips = currentVisit.fuelCount();
+            if (reequip) {
+                reequips++;
+                Deque<Visit> equip = new ArrayDeque<>();
+                if (planEquip(equip, spec.tool(), spec.minHarvest(), true, false) != null) {
+                    next.addAll(equip);
+                } else if (spec.toolRequired()) {
+                    // Nothing to hand, in storage or craftable - work one up from raw materials.
+                    next.add(Visit.obtainTool(ToolKit.cheapestTool(spec.tool(), spec.minHarvest()), 1));
+                }
+            }
+            next.add(Visit.gather(spec, remaining, reequips));
+        }
+        for (int i = next.size() - 1; i >= 0; i--) {
+            plan.addFirst(next.get(i));
+        }
+        finishVisit();
+    }
+
+    /**
+     * One DEPOSIT_ITEM per item type the bot carries (tools excluded), each aimed at a chest
+     * already holding some, walked in nearest-first order. A chest turning out full is handled by
+     * the deposit itself, which moves on to the next candidate.
+     */
+    private List<Visit> putAwayVisits() {
+        refreshBotInventory();
+        Set<String> items = new LinkedHashSet<>();
+        for (WebServer.InventorySlot slot : botInventory) {
+            if (slot.item() != null && !slot.kept()) {
+                items.add(slot.item());
+            }
+        }
+        Set<BlockPos> reserved = reservedChests();
+        Map<BlockPos, List<String>> byChest = new LinkedHashMap<>();
+        int unplaced = 0;
+        for (String item : items) {
+            BlockPos destination = index.depositCandidates(item, reserved).stream().findFirst().orElse(null);
+            if (destination == null) {
+                unplaced++;
+                continue;
+            }
+            byChest.computeIfAbsent(destination, key -> new ArrayList<>()).add(item);
+        }
+        if (unplaced > 0) {
+            warn("No storage chest known to put {} item type(s) in - they stay in the bot's inventory", unplaced);
+        }
+        List<Visit> visits = new ArrayList<>();
+        for (BlockPos pos : nearestFirst(new ArrayList<>(byChest.keySet()), playerPos())) {
+            for (String item : byChest.get(pos)) {
+                visits.add(new Visit(pos, VisitKind.DEPOSIT_ITEM, item));
+            }
+        }
+        return visits;
+    }
+
+    /** Cargo count of an item in the bot's inventory, not counting equipped tools. */
+    private int inventoryCount(String itemId) {
+        LocalPlayer player = Minecraft.getInstance().player;
+        if (player == null) {
+            return 0;
+        }
+        Set<Integer> kept = keptToolSlots();
+        int total = 0;
+        for (int slot = 0; slot < 36; slot++) {
+            ItemStack stack = player.getInventory().getItem(slot);
+            if (!stack.isEmpty() && !kept.contains(slot)
+                    && BuiltInRegistries.ITEM.getKey(stack.getItem()).toString().equals(itemId)) {
+                total += stack.getCount();
+            }
+        }
+        return total;
+    }
+
+    private int freeInventorySlots() {
+        LocalPlayer player = Minecraft.getInstance().player;
+        if (player == null) {
+            return 0;
+        }
+        int free = 0;
+        for (int slot = 0; slot < 36; slot++) {
+            if (player.getInventory().getItem(slot).isEmpty()) {
+                free++;
+            }
+        }
+        return free;
+    }
+
+    private boolean equippedToolCarried(ToolKit.Category category) {
+        String tool = index.getEquippedTools().get(category.key());
+        return tool != null && botCarriesAny(tool);
+    }
+
+    /** The block the bot is mid-way through breaking, or null. Baritone breaks through the vanilla crosshair. */
+    private static BlockPos blockBeingBroken() {
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.gameMode == null || !mc.gameMode.isDestroying()) {
+            return null;
+        }
+        return mc.hitResult instanceof BlockHitResult hit && hit.getType() == HitResult.Type.BLOCK
+                ? hit.getBlockPos() : null;
+    }
+
+    /**
+     * Whether a block is part of the storage setup: inside the region (plus a block of margin for
+     * its walls) or next to one of the configured chests, table or furnace. Gathering cobblestone
+     * next to a cobblestone storage room would otherwise take the walls down first - they're the
+     * nearest cobblestone Baritone knows of.
+     */
+    private boolean isProtected(BlockPos pos) {
+        StorageIndex.Region region = index.getRegion();
+        if (region.min != null && region.max != null) {
+            BlockPos a = region.min.toBlockPos();
+            BlockPos b = region.max.toBlockPos();
+            if (pos.getX() >= Math.min(a.getX(), b.getX()) - PROTECTED_MARGIN
+                    && pos.getX() <= Math.max(a.getX(), b.getX()) + PROTECTED_MARGIN
+                    && pos.getY() >= Math.min(a.getY(), b.getY()) - PROTECTED_MARGIN
+                    && pos.getY() <= Math.max(a.getY(), b.getY()) + PROTECTED_MARGIN
+                    && pos.getZ() >= Math.min(a.getZ(), b.getZ()) - PROTECTED_MARGIN
+                    && pos.getZ() <= Math.max(a.getZ(), b.getZ()) + PROTECTED_MARGIN) {
+                return true;
+            }
+        }
+        for (BlockPos configured : new BlockPos[] {
+                index.getInputChest(), index.getOutputChest(), index.getCraftingTable(), index.getFurnace()}) {
+            if (configured != null && pos.distManhattan(configured) <= PROTECTED_MARGIN) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Empties the input chest by scattering each stack into an independently-chosen random
      * storage chest - two stacks of the same item intentionally end up in different chests
      * (this is the whole point of the sort: not consolidation). When more stacks of one item
@@ -1644,7 +2808,13 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
      * caller has already finished reading the container by the time it gets here.
      */
     private void finishVisit() {
-        interactor.close();
+        if (currentVisit != null && currentVisit.kind() == VisitKind.CRAFT) {
+            craftingInteractor.close();
+        } else if (currentVisit != null && currentVisit.kind() == VisitKind.SMELT) {
+            furnaceInteractor.close();
+        } else {
+            interactor.close();
+        }
         // For RANDOMIZE, each batch is independent - if the plan is empty but more items still
         // need scattering, build the next batch here rather than finishing the job. Without this
         // the bot would stop after one batch's worth of drops even if half the room's stacks
@@ -1671,6 +2841,7 @@ public class JobExecutor implements storage.manager.client.web.WebServer.Executo
         randomizeRemaining = null;
         randomizeBatchDestinations = null;
         randomizeLeftovers = null;
+        gather = null;
         // Nudge the daemon saver to flush sooner than its next 5s tick rather than blocking the
         // client tick thread on disk I/O here - flush() does sync writes, and finishJob() runs on
         // the tick thread, so calling it would re-introduce exactly the stutter the debounced

@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
+import java.util.function.BiFunction;
 
 /**
  * Local control surface for the bot: a static single-page UI plus a small JSON API.
@@ -62,13 +63,16 @@ public class WebServer {
     private final StorageIndex index;
     private final ExecutorView executor;
     private final ItemTextures textures;
+    private final BaritoneSettingsView baritoneSettings;
     private HttpServer server;
 
-    public WebServer(JobQueue queue, StorageIndex index, ExecutorView executor, ItemTextures textures) {
+    public WebServer(JobQueue queue, StorageIndex index, ExecutorView executor, ItemTextures textures,
+                     BaritoneSettingsView baritoneSettings) {
         this.queue = queue;
         this.index = index;
         this.executor = executor;
         this.textures = textures;
+        this.baritoneSettings = baritoneSettings;
     }
 
     /**
@@ -93,8 +97,30 @@ public class WebServer {
         boolean isWanderEnabled();
     }
 
-    /** JSON-friendly snapshot of one player-inventory slot. Empty slots have a null item. */
-    public record InventorySlot(int slot, String item, int count) {}
+    /**
+     * Read/write access to Baritone's settings. Implementations do their own hop onto the client
+     * tick thread; they throw {@link IllegalArgumentException} for a bad name or value (the
+     * message is shown to the user) and {@link IllegalStateException} when the game can't answer.
+     */
+    public interface BaritoneSettingsView {
+        List<BaritoneSetting> list();
+        BaritoneSetting set(String name, String value);
+        BaritoneSetting reset(String name);
+    }
+
+    /**
+     * One Baritone setting as the UI sees it. Values are in Baritone's own text format - the same
+     * one {@code #set} accepts. Java-only settings (callbacks and the like) have null values and
+     * aren't editable, but are still listed so the page shows every setting there is.
+     */
+    public record BaritoneSetting(String name, String type, String value, String defaultValue,
+                                  boolean modified, boolean editable) {}
+
+    /**
+     * JSON-friendly snapshot of one player-inventory slot. Empty slots have a null item. {@code kept}
+     * marks an equipped tool, which deposits leave with the bot.
+     */
+    public record InventorySlot(int slot, String item, int count, boolean kept) {}
 
     public void start(int port, boolean lanAccessible) {
         try {
@@ -111,10 +137,14 @@ public class WebServer {
             server.createContext("/api/chests/clear", this::handleClearChests);
             server.createContext("/api/sort", this::handleSort);
             server.createContext("/api/randomize", this::handleRandomize);
+            server.createContext("/api/craft", exchange -> handleItemJob(exchange, Job::craft));
+            server.createContext("/api/gather", exchange -> handleItemJob(exchange, Job::gather));
+            server.createContext("/api/tools", this::handleTools);
             server.createContext("/api/stop", this::handleStop);
             server.createContext("/api/wander", this::handleWander);
             server.createContext("/api/texture", this::handleTexture);
             server.createContext("/api/setup", this::handleSetup);
+            server.createContext("/api/baritone/settings", this::handleBaritoneSettings);
             server.setExecutor(Executors.newFixedThreadPool(WEB_THREAD_POOL_SIZE, webThreadFactory()));
             server.start();
             StorageManager.LOGGER.info("Storage Manager web UI listening on http://{}:{}", host, port);
@@ -189,6 +219,7 @@ public class WebServer {
         payload.put("lastWarning", executor.getLastWarning());
         payload.put("paused", executor.isPaused());
         payload.put("wanderEnabled", executor.isWanderEnabled());
+        payload.put("tools", index.getEquippedTools());
         payload.put("queueSize", queue.size());
         payload.put("queue", queue.snapshot().stream().map(Job::toString).toList());
         sendJson(exchange, 200, payload);
@@ -250,6 +281,54 @@ public class WebServer {
             return;
         }
         queue.enqueue(Job.randomize());
+        sendJson(exchange, 200, Map.of("ok", true));
+    }
+
+    /** POST endpoint validating {item, count} and enqueuing a craft or gather request. */
+    private void handleItemJob(HttpExchange exchange, BiFunction<String, Integer, Job> job) throws IOException {
+        if (!"POST".equals(exchange.getRequestMethod())) {
+            exchange.sendResponseHeaders(405, -1);
+            return;
+        }
+        JsonObject body = readJson(exchange);
+        if (body == null || !body.has("item") || !body.has("count")) {
+            sendJson(exchange, 400, Map.of("error", "expected {item, count}"));
+            return;
+        }
+        String item = body.get("item").getAsString();
+        int count = body.get("count").getAsInt();
+        if (item.isBlank()) {
+            sendJson(exchange, 400, Map.of("error", "item must not be blank"));
+            return;
+        }
+        if (count <= 0) {
+            sendJson(exchange, 400, Map.of("error", "count must be positive"));
+            return;
+        }
+        queue.enqueue(job.apply(item, count));
+        sendJson(exchange, 200, Map.of("ok", true));
+    }
+
+    /**
+     * POST {@code {action: "equip"}} fetches the best tools from storage; {@code "stow"} puts them all
+     * back; {@code "kit"} (debug) fetches a full set of diamond tools.
+     */
+    private void handleTools(HttpExchange exchange) throws IOException {
+        if (!"POST".equals(exchange.getRequestMethod())) {
+            exchange.sendResponseHeaders(405, -1);
+            return;
+        }
+        JsonObject body = readJson(exchange);
+        String action = body != null && body.has("action") ? body.get("action").getAsString() : "";
+        switch (action) {
+            case "equip" -> queue.enqueue(Job.equipTools());
+            case "stow" -> queue.enqueue(Job.stowTools());
+            case "kit" -> queue.enqueue(Job.kit());
+            default -> {
+                sendJson(exchange, 400, Map.of("error", "expected {action: \"equip\" | \"stow\" | \"kit\"}"));
+                return;
+            }
+        }
         sendJson(exchange, 200, Map.of("ok", true));
     }
 
@@ -316,6 +395,40 @@ public class WebServer {
         }
     }
 
+    /**
+     * GET lists every setting; POST takes {@code {name, value}} to set one or {@code {name, reset: true}}
+     * to put it back to its default, and answers with the setting's new state.
+     */
+    private void handleBaritoneSettings(HttpExchange exchange) throws IOException {
+        String method = exchange.getRequestMethod();
+        if (!"GET".equals(method) && !"POST".equals(method)) {
+            exchange.sendResponseHeaders(405, -1);
+            return;
+        }
+        try {
+            if ("GET".equals(method)) {
+                sendJson(exchange, 200, Map.of("settings", baritoneSettings.list()));
+                return;
+            }
+            JsonObject body = readJson(exchange);
+            boolean reset = body != null && body.has("reset") && body.get("reset").getAsBoolean();
+            if (body == null || !body.has("name") || !(reset || body.has("value"))) {
+                sendJson(exchange, 400, Map.of("error", "expected {name, value} or {name, reset: true}"));
+                return;
+            }
+            String name = body.get("name").getAsString();
+            BaritoneSetting updated = reset
+                    ? baritoneSettings.reset(name)
+                    : baritoneSettings.set(name, body.get("value").getAsString());
+            sendJson(exchange, 200, Map.of("setting", updated));
+        } catch (IllegalArgumentException e) {
+            sendJson(exchange, 400, Map.of("error", String.valueOf(e.getMessage())));
+        } catch (IllegalStateException e) {
+            StorageManager.LOGGER.warn("Baritone settings request failed", e);
+            sendJson(exchange, 503, Map.of("error", String.valueOf(e.getMessage())));
+        }
+    }
+
     private static String queryParam(HttpExchange exchange, String name) {
         String query = exchange.getRequestURI().getRawQuery();
         if (query == null) {
@@ -336,6 +449,8 @@ public class WebServer {
             payload.put("region", index.getRegion());
             payload.put("inputChest", index.getInputChestPos());
             payload.put("outputChest", index.getOutputChestPos());
+            payload.put("craftingTable", index.getCraftingTablePos());
+            payload.put("furnace", index.getFurnacePos());
             // Both halves of each, resolved against the world by the client tick thread - the
             // index keys a double chest by its LEFT half, which may not be the half the user typed.
             payload.put("resolved", executor.reservedChestPositions());
@@ -392,6 +507,8 @@ public class WebServer {
         BlockPos[] region = null;
         BlockPos inputChest = null;
         BlockPos outputChest = null;
+        BlockPos craftingTable = null;
+        BlockPos furnace = null;
         if (body.has("region")) {
             String error = readPosPair(body.get("region"), "region");
             if (error != null) {
@@ -413,6 +530,20 @@ public class WebServer {
             }
             outputChest = readPosPosition(body.get("outputChest"));
         }
+        if (body.has("craftingTable")) {
+            String error = readPos(body.get("craftingTable"), "craftingTable");
+            if (error != null) {
+                return SetupResult.fail(error);
+            }
+            craftingTable = readPosPosition(body.get("craftingTable"));
+        }
+        if (body.has("furnace")) {
+            String error = readPos(body.get("furnace"), "furnace");
+            if (error != null) {
+                return SetupResult.fail(error);
+            }
+            furnace = readPosPosition(body.get("furnace"));
+        }
         if (region != null) {
             index.setRegion(region[0], region[1]);
         }
@@ -421,6 +552,12 @@ public class WebServer {
         }
         if (outputChest != null) {
             index.setOutputChest(outputChest);
+        }
+        if (craftingTable != null) {
+            index.setCraftingTable(craftingTable);
+        }
+        if (furnace != null) {
+            index.setFurnace(furnace);
         }
         return SetupResult.OK;
     }

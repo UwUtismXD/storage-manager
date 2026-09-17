@@ -85,15 +85,66 @@
     background: #10131a; font-size: 11px; overflow: hidden;
   }
   .bot-slot.empty { color: var(--muted); text-align: center; }
+  .bot-slot.kept { border-color: var(--accent); }
   .bot-slot-item { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .bot-slot-count { display: block; color: var(--accent); margin-top: 4px; font-weight: 600; }
   .live-note { color: var(--muted); font-size: 11px; margin-top: 10px; }
+  .tabs { display: flex; gap: 4px; margin: 0 0 16px; border-bottom: 1px solid var(--border); }
+  .tabs button {
+    background: transparent; color: var(--muted); border-radius: 6px 6px 0 0;
+    border-bottom: 2px solid transparent; padding: 8px 14px; font-weight: 500;
+  }
+  .tabs button[aria-selected=true] { color: var(--text); border-bottom-color: var(--accent); }
+  .settings-toolbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .settings-toolbar input[type=text] { flex: 1; min-width: 200px; width: auto; }
+  .settings-toolbar label.check { margin: 0; }
+  .settings-count { color: var(--muted); font-size: 12px; }
+  .settings-table { table-layout: fixed; }
+  .settings-table td { vertical-align: middle; word-break: break-word; }
+  .settings-table .col-name { width: 26%; }
+  .settings-table .col-type { width: 14%; }
+  .settings-table .col-default { width: 20%; }
+  .settings-table .col-reset { width: 70px; }
+  .setting-name { font-family: Consolas, monospace; }
+  .setting-name.modified::after { content: " \2022"; color: var(--accent); }
+  .setting-type, .setting-default { color: var(--muted); font-family: Consolas, monospace; font-size: 12px; }
+  .settings-table input[type=text] { font-family: Consolas, monospace; font-size: 12px; padding: 4px 6px; }
+  .settings-table button { padding: 4px 10px; font-size: 12px; }
+  .settings-table button:disabled { opacity: 0.35; cursor: default; filter: none; }
+  .setting-msg { display: block; font-size: 11px; margin-top: 3px; }
+  .setting-msg.error { color: var(--danger); }
+  .setting-msg.ok { color: var(--accent); }
 </style>
 </head>
 <body>
   <h1>Storage Manager</h1>
   <p class="sub">Baritone-powered storage bot control panel &middot; <a href="/chests">Browse chests &rarr;</a></p>
 
+  <nav class="tabs" role="tablist">
+    <button role="tab" id="tabBtn-control" aria-selected="true" onclick="showTab('control')">Control panel</button>
+    <button role="tab" id="tabBtn-baritone" aria-selected="false" onclick="showTab('baritone')">Baritone settings</button>
+  </nav>
+
+  <section id="tab-baritone" hidden>
+    <div class="panel">
+      <div class="settings-toolbar">
+        <input type="text" id="settingsSearch" placeholder="Filter settings..." oninput="filterSettings()">
+        <label class="check"><input type="checkbox" id="settingsModifiedOnly" onchange="filterSettings()"> Changed only</label>
+        <span class="settings-count" id="settingsCount"></span>
+        <button class="secondary" onclick="loadBaritoneSettings()">Reload</button>
+      </div>
+      <div class="live-note" style="margin: 0 0 10px;">Values use the same format as <code>#set</code> in game. Press Enter or click away to apply. Changes save to Baritone's settings.txt.</div>
+      <table class="settings-table">
+        <thead><tr>
+          <th class="col-name">Setting</th><th class="col-type">Type</th><th>Value</th>
+          <th class="col-default">Default</th><th class="col-reset"></th>
+        </tr></thead>
+        <tbody id="settingsBody"><tr><td colspan="5" class="empty-note">Loading...</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="tab-control">
   <div class="grid">
     <!-- Two explicit columns rather than letting three panels flow: the inventory is much
          taller than the others, so auto-placement left a dead gap under the status panel. -->
@@ -119,6 +170,15 @@
       <h2>Bot inventory</h2>
       <div id="botInventory" class="bot-slots" aria-live="polite"></div>
       <div id="botInventoryNote" class="live-note">Waiting for live inventory data...</div>
+      <div id="toolsText" class="sub" style="margin-top: 10px;">Equipped tools: none</div>
+      <div class="actions">
+        <button class="secondary" onclick="post('/api/tools', { action: 'equip' })"
+                title="Takes the best pickaxe, axe and shovel from storage. Equipped tools are never put away by other jobs">Equip best tools</button>
+        <button class="secondary" onclick="post('/api/tools', { action: 'stow' })"
+                title="Unequips every tool and puts them back into storage">Put tools away</button>
+        <button class="secondary" onclick="post('/api/tools', { action: 'kit' })"
+                title="Debug: gets a full set of diamond tools - from storage, or by crafting them, gathering whatever the crafts are short of">Kit</button>
+      </div>
     </div>
 
     <div class="panel">
@@ -147,9 +207,49 @@
         <div><input type="number" id="outY" placeholder="y"></div>
         <div><input type="number" id="outZ" placeholder="z"></div>
       </div>
+      <label>Crafting table (x, y, z)</label>
+      <div class="row">
+        <div><input type="number" id="craftX" placeholder="x"></div>
+        <div><input type="number" id="craftY" placeholder="y"></div>
+        <div><input type="number" id="craftZ" placeholder="z"></div>
+      </div>
+      <label>Furnace (x, y, z)</label>
+      <div class="row">
+        <div><input type="number" id="furnaceX" placeholder="x"></div>
+        <div><input type="number" id="furnaceY" placeholder="y"></div>
+        <div><input type="number" id="furnaceZ" placeholder="z"></div>
+      </div>
       <button class="secondary" onclick="saveSetup()">Save setup</button>
       <button class="danger" onclick="clearChestIndex()"
               title="Removes cached chest locations and contents but keeps this setup">Clear indexed chests</button>
+    </div>
+
+    <div class="panel">
+      <h2>Craft</h2>
+      <label>Item id</label>
+      <div class="row">
+        <div><input type="text" id="craftItem" placeholder="minecraft:stick"></div>
+      </div>
+      <label>Count</label>
+      <div class="row">
+        <div><input type="number" id="craftCount" min="1" value="1"></div>
+      </div>
+      <button onclick="craftItem()">Craft</button>
+      <div class="live-note">Crafts or smelts the item, making any missing ingredients first. Needs the crafting table and/or furnace saved in Setup, and the raw materials (plus fuel for smelting) in storage. The bot waits at the furnace while it smelts, about 10s an item.</div>
+    </div>
+
+    <div class="panel">
+      <h2>Gather</h2>
+      <label>Item or block id</label>
+      <div class="row">
+        <div><input type="text" id="gatherItem" placeholder="minecraft:raw_iron"></div>
+      </div>
+      <label>Count</label>
+      <div class="row">
+        <div><input type="number" id="gatherCount" min="1" value="64"></div>
+      </div>
+      <button onclick="gatherItem()">Gather</button>
+      <div class="live-note">Any item a block drops: ores, logs, string from cobwebs, saplings and apples from leaves, seeds from grass. Mines with Baritone until that many are picked up, bringing everything back to storage whenever the inventory fills. Equips a suitable tool first - from its own inventory, storage, or by crafting one - and swaps in a new one if it breaks. Naming an ore gathers what it drops. Stops if Baritone starts breaking anything in the storage region.</div>
     </div>
     </div>
 
@@ -164,6 +264,7 @@
     </div>
     </div>
   </div>
+  </section>
 
 <script>
 let totals = {};
@@ -187,6 +288,20 @@ const withdrawCounts = {};
 async function withdrawItem(item, count) {
   if (!item || !Number.isFinite(count) || count < 1) return;
   await post('/api/withdraw', { item, count });
+}
+
+async function gatherItem() {
+  const item = document.getElementById('gatherItem').value.trim();
+  const count = parseInt(document.getElementById('gatherCount').value, 10);
+  if (!item || !Number.isFinite(count) || count < 1) return;
+  await post('/api/gather', { item, count });
+}
+
+async function craftItem() {
+  const item = document.getElementById('craftItem').value.trim();
+  const count = parseInt(document.getElementById('craftCount').value, 10);
+  if (!item || !Number.isFinite(count) || count < 1) return;
+  await post('/api/craft', { item, count });
 }
 
 // Guards the checkbox against being reverted by a status poll that's already in flight.
@@ -220,7 +335,12 @@ async function saveSetup() {
       max: { x: num('maxX'), y: num('maxY'), z: num('maxZ') }
     },
     inputChest: { x: num('inX'), y: num('inY'), z: num('inZ') },
-    outputChest: { x: num('outX'), y: num('outY'), z: num('outZ') }
+    outputChest: { x: num('outX'), y: num('outY'), z: num('outZ') },
+    craftingTable: { x: num('craftX'), y: num('craftY'), z: num('craftZ') },
+    // Optional: left out while blank, so an unused furnace isn't saved as 0,0,0.
+    ...(['furnaceX', 'furnaceY', 'furnaceZ'].some(id => document.getElementById(id).value !== '')
+      ? { furnace: { x: num('furnaceX'), y: num('furnaceY'), z: num('furnaceZ') } }
+      : {})
   });
 }
 
@@ -301,7 +421,8 @@ function renderBotInventory(slots) {
   for (let i = 0; i < 36; i++) {
     const slot = slots[i] || null;
     const cell = document.createElement('div');
-    cell.className = 'bot-slot' + (slot && slot.item ? '' : ' empty');
+    cell.className = 'bot-slot' + (slot && slot.item ? '' : ' empty') + (slot && slot.kept ? ' kept' : '');
+    if (slot && slot.kept) cell.title = 'Equipped tool - stays with the bot';
     if (slot && slot.item) {
       const item = document.createElement('span');
       item.className = 'bot-slot-item';
@@ -343,6 +464,8 @@ async function refreshStatus() {
     document.getElementById('wander').checked = !!data.wanderEnabled;
   }
   document.getElementById('queueText').textContent = data.queueSize + ' job(s) queued: ' + data.queue.join(', ');
+  const tools = Object.entries(data.tools || {}).map(([kind, item]) => kind + ': ' + item);
+  document.getElementById('toolsText').textContent = 'Equipped tools: ' + (tools.length ? tools.join(', ') : 'none');
   const warningEl = document.getElementById('warningText');
   if (data.lastWarning) {
     warningEl.textContent = 'Last warning: ' + data.lastWarning;
@@ -379,8 +502,157 @@ async function loadSetup() {
   }
   if (data.inputChest) { setVal('inX', data.inputChest.x); setVal('inY', data.inputChest.y); setVal('inZ', data.inputChest.z); }
   if (data.outputChest) { setVal('outX', data.outputChest.x); setVal('outY', data.outputChest.y); setVal('outZ', data.outputChest.z); }
+  if (data.craftingTable) { setVal('craftX', data.craftingTable.x); setVal('craftY', data.craftingTable.y); setVal('craftZ', data.craftingTable.z); }
+  if (data.furnace) { setVal('furnaceX', data.furnace.x); setVal('furnaceY', data.furnace.y); setVal('furnaceZ', data.furnace.z); }
 }
 
+// ---- Tabs ----
+
+function showTab(name) {
+  for (const tab of ['control', 'baritone']) {
+    document.getElementById('tab-' + tab).hidden = tab !== name;
+    document.getElementById('tabBtn-' + tab).setAttribute('aria-selected', String(tab === name));
+  }
+  history.replaceState(null, '', name === 'control' ? location.pathname : '#' + name);
+  // Loaded on first open rather than polled: re-rendering would clobber a value mid-edit.
+  if (name === 'baritone' && !baritoneSettingsLoaded) loadBaritoneSettings();
+}
+
+// ---- Baritone settings ----
+
+let baritoneSettingsLoaded = false;
+// name -> { setting, row }, kept so a single save can update its row in place.
+const settingRows = new Map();
+
+async function loadBaritoneSettings() {
+  const body = document.getElementById('settingsBody');
+  try {
+    const res = await fetch('/api/baritone/settings', { cache: 'no-store' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    body.innerHTML = '';
+    settingRows.clear();
+    for (const setting of data.settings) {
+      const row = document.createElement('tr');
+      settingRows.set(setting.name, { setting, row });
+      renderSettingRow(setting, row);
+      body.appendChild(row);
+    }
+    baritoneSettingsLoaded = true;
+    filterSettings();
+  } catch (e) {
+    body.innerHTML = '';
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 5;
+    td.className = 'empty-note';
+    td.textContent = 'Could not load Baritone settings: ' + e.message;
+    tr.appendChild(td);
+    body.appendChild(tr);
+  }
+}
+
+// DOM calls rather than innerHTML: values like block lists are user-controlled text.
+function renderSettingRow(setting, row, message) {
+  row.innerHTML = '';
+
+  const nameCell = document.createElement('td');
+  nameCell.className = 'setting-name' + (setting.modified ? ' modified' : '');
+  nameCell.textContent = setting.name;
+  if (setting.modified) nameCell.title = 'Changed from default';
+
+  const typeCell = document.createElement('td');
+  typeCell.className = 'setting-type';
+  typeCell.textContent = setting.type;
+
+  const valueCell = document.createElement('td');
+  if (!setting.editable) {
+    valueCell.className = 'setting-default';
+    valueCell.textContent = 'Can only be changed from code';
+  } else if (setting.type === 'boolean') {
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = setting.value === 'true';
+    box.onchange = () => saveSetting(setting.name, { value: String(box.checked) });
+    valueCell.appendChild(box);
+  } else {
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = setting.value;
+    input.spellcheck = false;
+    if (/^(int|long|float|double|byte|short)$/i.test(setting.type)) input.inputMode = 'decimal';
+    // 'change' fires on Enter or blur, and only if the text actually differs.
+    input.onchange = () => saveSetting(setting.name, { value: input.value });
+    input.onkeydown = (e) => { if (e.key === 'Escape') { input.value = setting.value; input.blur(); } };
+    valueCell.appendChild(input);
+  }
+  if (message) {
+    const msg = document.createElement('span');
+    msg.className = 'setting-msg ' + message.kind;
+    msg.textContent = message.text;
+    valueCell.appendChild(msg);
+  }
+
+  const defaultCell = document.createElement('td');
+  defaultCell.className = 'setting-default';
+  defaultCell.textContent = setting.defaultValue ?? '';
+
+  const resetCell = document.createElement('td');
+  if (setting.editable) {
+    const reset = document.createElement('button');
+    reset.className = 'secondary';
+    reset.textContent = 'Reset';
+    reset.disabled = !setting.modified;
+    reset.onclick = () => saveSetting(setting.name, { reset: true });
+    resetCell.appendChild(reset);
+  }
+
+  row.append(nameCell, typeCell, valueCell, defaultCell, resetCell);
+}
+
+async function saveSetting(name, change) {
+  const entry = settingRows.get(name);
+  let message;
+  try {
+    const res = await fetch('/api/baritone/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, ...change })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    entry.setting = data.setting;
+    message = { kind: 'ok', text: change.reset ? 'Reset to default' : 'Saved' };
+  } catch (e) {
+    // Re-render from the last known good value so the row never shows something Baritone rejected.
+    message = { kind: 'error', text: e.message };
+  }
+  renderSettingRow(entry.setting, entry.row, message);
+  updateSettingsCount();
+}
+
+function filterSettings() {
+  const filter = document.getElementById('settingsSearch').value.trim().toLowerCase();
+  const modifiedOnly = document.getElementById('settingsModifiedOnly').checked;
+  for (const { setting, row } of settingRows.values()) {
+    const matches = setting.name.toLowerCase().includes(filter)
+      || (setting.value || '').toLowerCase().includes(filter);
+    row.hidden = !matches || (modifiedOnly && !setting.modified);
+  }
+  updateSettingsCount();
+}
+
+function updateSettingsCount() {
+  let shown = 0, modified = 0;
+  for (const { setting, row } of settingRows.values()) {
+    if (!row.hidden) shown++;
+    if (setting.modified) modified++;
+  }
+  document.getElementById('settingsCount').textContent =
+    shown + ' of ' + settingRows.size + ' shown · ' + modified + ' changed';
+}
+
+showTab(location.hash === '#baritone' ? 'baritone' : 'control');
 loadSetup();
 refreshLive();
 setInterval(refreshLive, 500);

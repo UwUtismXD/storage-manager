@@ -153,6 +153,13 @@ public class StorageIndex {
     private Region region = new Region();
     private Pos inputChest;
     private Pos outputChest;
+    private Pos craftingTable;
+    private Pos furnace;
+    /**
+     * The bot's equipped tools, tool category key ({@code "pickaxe"}) to item id. Persisted so a
+     * restart doesn't turn the bot's own pickaxe back into cargo that the next dump puts away.
+     */
+    private final Map<String, String> tools = new LinkedHashMap<>();
     private final Map<String, ChestEntry> chests = new LinkedHashMap<>();
     private final Object flushLock = new Object();
     private boolean dirty;
@@ -230,9 +237,20 @@ public class StorageIndex {
             return;
         }
         this.region = data.region != null ? data.region : new Region();
-        // inputChest / outputChest: null is the legitimate "not configured" state, leave alone.
+        // inputChest / outputChest / craftingTable / furnace: null is the legitimate "not
+        // configured" state, leave alone.
         this.inputChest = data.inputChest;
         this.outputChest = data.outputChest;
+        this.craftingTable = data.craftingTable;
+        this.furnace = data.furnace;
+        this.tools.clear();
+        if (data.tools != null) {
+            data.tools.forEach((category, item) -> {
+                if (category != null && item != null) {
+                    tools.put(category, item);
+                }
+            });
+        }
         this.chests.clear();
         if (data.chests != null) {
             int skipped = 0;
@@ -395,6 +413,9 @@ public class StorageIndex {
                 data.region = region;
                 data.inputChest = inputChest;
                 data.outputChest = outputChest;
+                data.craftingTable = craftingTable;
+                data.furnace = furnace;
+                data.tools = tools;
                 data.chests = chests;
                 json = GSON.toJson(data);
             }
@@ -442,7 +463,30 @@ public class StorageIndex {
         Region region;
         Pos inputChest;
         Pos outputChest;
+        Pos craftingTable;
+        Pos furnace;
+        Map<String, String> tools;
         Map<String, ChestEntry> chests;
+    }
+
+    /** A copy of the equipped tools, category key to item id. */
+    public synchronized Map<String, String> getEquippedTools() {
+        return new LinkedHashMap<>(tools);
+    }
+
+    /** Equips {@code itemId} as the bot's tool for {@code category}; null unequips it. */
+    public synchronized void setEquippedTool(String category, String itemId) {
+        boolean changed = itemId == null ? tools.remove(category) != null : !itemId.equals(tools.put(category, itemId));
+        if (changed) {
+            markDirty();
+        }
+    }
+
+    public synchronized void clearEquippedTools() {
+        if (!tools.isEmpty()) {
+            tools.clear();
+            markDirty();
+        }
     }
 
     public synchronized void setRegion(BlockPos min, BlockPos max) {
@@ -463,12 +507,26 @@ public class StorageIndex {
         markDirty();
     }
 
+    public synchronized void setCraftingTable(BlockPos pos) {
+        this.craftingTable = new Pos(pos);
+        markDirty();
+    }
+
+    public synchronized void setFurnace(BlockPos pos) {
+        this.furnace = new Pos(pos);
+        markDirty();
+    }
+
     public synchronized BlockPos getInputChest() {
         return inputChest != null ? inputChest.toBlockPos() : null;
     }
 
     public synchronized BlockPos getOutputChest() {
         return outputChest != null ? outputChest.toBlockPos() : null;
+    }
+
+    public synchronized BlockPos getCraftingTable() {
+        return craftingTable != null ? craftingTable.toBlockPos() : null;
     }
 
     /** Raw x/y/z form (as opposed to {@link #getInputChest()}) for reporting back to the web UI. */
@@ -478,6 +536,18 @@ public class StorageIndex {
 
     public synchronized Pos getOutputChestPos() {
         return outputChest;
+    }
+
+    public synchronized Pos getCraftingTablePos() {
+        return craftingTable;
+    }
+
+    public synchronized BlockPos getFurnace() {
+        return furnace != null ? furnace.toBlockPos() : null;
+    }
+
+    public synchronized Pos getFurnacePos() {
+        return furnace;
     }
 
     public synchronized Region getRegion() {

@@ -61,6 +61,18 @@ class StorageIndexPersistenceTest {
     }
 
     @Test
+    void equippedToolsSurviveARestart() {
+        index.setEquippedTool("pickaxe", "minecraft:iron_pickaxe");
+        index.setEquippedTool("axe", "minecraft:stone_axe");
+        index.setEquippedTool("axe", null);
+        index.flush();
+
+        StorageIndex reloaded = new StorageIndex(indexFile);
+        reloaded.load();
+        assertEquals(java.util.Map.of("pickaxe", "minecraft:iron_pickaxe"), reloaded.getEquippedTools());
+    }
+
+    @Test
     void malformedJsonIsQuarantinedAndIndexStaysEmpty() throws IOException {
         Files.writeString(indexFile, "{ this is not valid json", StandardCharsets.UTF_8);
 

@@ -6,6 +6,7 @@ import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 
 import storage.manager.StorageManager;
 
+import storage.manager.client.baritone.BaritoneSettings;
 import storage.manager.client.job.JobExecutor;
 import storage.manager.client.job.JobQueue;
 import storage.manager.client.storage.StorageIndex;
@@ -14,14 +15,33 @@ import storage.manager.client.web.WebServer;
 
 public class StorageManagerClient implements ClientModInitializer {
 
-    private static final int WEB_PORT = 8642;
+    public static final int WEB_PORT = 8642;
     private static final float PAUSE_HEALTH_THRESHOLD = 6.0f;  // 3 hearts
     private static final float RESUME_HEALTH_THRESHOLD = 12.0f; // 6 hearts
 
-    private StorageIndex index;
-    private JobExecutor executor;
+    /**
+     * Published for the Meteor addon, which is built by Meteor's own initializer and can't be
+     * handed these through a constructor. Volatile because that initializer may run on either
+     * side of this one - the addon reads them when a button is actually clicked, not at startup.
+     */
+    private static volatile StorageIndex index;
+    private static volatile JobExecutor executor;
+    private static volatile JobQueue queue;
+
     private WebServer webServer;
     private ItemTextures textures;
+
+    public static StorageIndex index() {
+        return index;
+    }
+
+    public static JobExecutor executor() {
+        return executor;
+    }
+
+    public static JobQueue queue() {
+        return queue;
+    }
 
     @Override
     public void onInitializeClient() {
@@ -40,9 +60,9 @@ public class StorageManagerClient implements ClientModInitializer {
         textures = new ItemTextures();
         textures.registerReloadListener();
 
-        JobQueue queue = new JobQueue();
+        queue = new JobQueue();
         executor = new JobExecutor(queue, index);
-        webServer = new WebServer(queue, index, executor, textures);
+        webServer = new WebServer(queue, index, executor, textures, new BaritoneSettings());
         webServer.start(WEB_PORT, false);
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {

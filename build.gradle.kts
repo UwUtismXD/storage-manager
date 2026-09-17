@@ -16,6 +16,9 @@ repositories {
     // Baritone has no reliable public Maven repo for recent Fabric builds, so the jars are
     // vendored locally - the 1.21.8 API jar under libs/, Meteor's 26.x forks under jars/.
     flatDir { dirs(rootProject.file("libs"), rootProject.file("jars")) }
+
+    maven("https://maven.meteordev.org/releases") { name = "Meteor Releases" }
+    maven("https://maven.meteordev.org/snapshots") { name = "Meteor Snapshots" }
 }
 
 dependencies {
@@ -36,6 +39,15 @@ dependencies {
     // Any, which would otherwise resolve the type parameter to Any and fail to convert.
     val baritoneJar: String = sc.properties["mod.baritone_jar"]
     modCompileOnly(files(rootProject.file(baritoneJar)))
+
+    // Same deal for Meteor: compiled against, never bundled - the user's own install provides it
+    // at runtime, and the mod still runs (web UI only) when it isn't there. Non-transitive because
+    // Meteor pulls in auth/proxy libraries from third-party repos that nothing in the addon touches.
+    val meteorVersion: String = sc.properties["deps.meteor_client"]
+    modCompileOnly("meteordevelopment:meteor-client:$meteorVersion") { isTransitive = false }
+    // Meteor's event bus - the one transitive dependency the addon does need, for @EventHandler.
+    // Every Meteor line built here uses the same release.
+    compileOnly("meteordevelopment:orbit:0.2.4")
 
     // Tier 1 (pure logic) + tier 2 (test doubles) JUnit 5 tests. Tier 3 would need live minecraft.
     testImplementation(platform("org.junit:junit-bom:5.11.4"))

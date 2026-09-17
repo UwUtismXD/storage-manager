@@ -1,0 +1,469 @@
+[
+  {
+    "type": "craft",
+    "result": "minecraft:oak_planks",
+    "resultCount": 4,
+    "shaped": false,
+    "ingredients": [
+      "minecraft:oak_log"
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:stick",
+    "resultCount": 4,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:oak_planks", "x": 0, "y": 0 },
+      { "item": "minecraft:oak_planks", "x": 0, "y": 1 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:torch",
+    "resultCount": 4,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:coal", "x": 0, "y": 0 },
+      { "item": "minecraft:stick", "x": 0, "y": 1 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:wooden_pickaxe",
+    "resultCount": 1,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:oak_planks", "x": 0, "y": 0 },
+      { "item": "minecraft:oak_planks", "x": 1, "y": 0 },
+      { "item": "minecraft:oak_planks", "x": 2, "y": 0 },
+      { "item": "minecraft:stick", "x": 1, "y": 1 },
+      { "item": "minecraft:stick", "x": 1, "y": 2 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:stone_pickaxe",
+    "resultCount": 1,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:cobblestone", "x": 0, "y": 0 },
+      { "item": "minecraft:cobblestone", "x": 1, "y": 0 },
+      { "item": "minecraft:cobblestone", "x": 2, "y": 0 },
+      { "item": "minecraft:stick", "x": 1, "y": 1 },
+      { "item": "minecraft:stick", "x": 1, "y": 2 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:iron_pickaxe",
+    "resultCount": 1,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:iron_ingot", "x": 0, "y": 0 },
+      { "item": "minecraft:iron_ingot", "x": 1, "y": 0 },
+      { "item": "minecraft:iron_ingot", "x": 2, "y": 0 },
+      { "item": "minecraft:stick", "x": 1, "y": 1 },
+      { "item": "minecraft:stick", "x": 1, "y": 2 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:diamond_pickaxe",
+    "resultCount": 1,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:diamond", "x": 0, "y": 0 },
+      { "item": "minecraft:diamond", "x": 1, "y": 0 },
+      { "item": "minecraft:diamond", "x": 2, "y": 0 },
+      { "item": "minecraft:stick", "x": 1, "y": 1 },
+      { "item": "minecraft:stick", "x": 1, "y": 2 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:wooden_axe",
+    "resultCount": 1,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:oak_planks", "x": 0, "y": 0 },
+      { "item": "minecraft:oak_planks", "x": 1, "y": 0 },
+      { "item": "minecraft:oak_planks", "x": 0, "y": 1 },
+      { "item": "minecraft:stick", "x": 1, "y": 1 },
+      { "item": "minecraft:stick", "x": 1, "y": 2 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:stone_axe",
+    "resultCount": 1,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:cobblestone", "x": 0, "y": 0 },
+      { "item": "minecraft:cobblestone", "x": 1, "y": 0 },
+      { "item": "minecraft:cobblestone", "x": 0, "y": 1 },
+      { "item": "minecraft:stick", "x": 1, "y": 1 },
+      { "item": "minecraft:stick", "x": 1, "y": 2 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:iron_axe",
+    "resultCount": 1,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:iron_ingot", "x": 0, "y": 0 },
+      { "item": "minecraft:iron_ingot", "x": 1, "y": 0 },
+      { "item": "minecraft:iron_ingot", "x": 0, "y": 1 },
+      { "item": "minecraft:stick", "x": 1, "y": 1 },
+      { "item": "minecraft:stick", "x": 1, "y": 2 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:diamond_axe",
+    "resultCount": 1,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:diamond", "x": 0, "y": 0 },
+      { "item": "minecraft:diamond", "x": 1, "y": 0 },
+      { "item": "minecraft:diamond", "x": 0, "y": 1 },
+      { "item": "minecraft:stick", "x": 1, "y": 1 },
+      { "item": "minecraft:stick", "x": 1, "y": 2 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:wooden_shovel",
+    "resultCount": 1,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:oak_planks", "x": 0, "y": 0 },
+      { "item": "minecraft:stick", "x": 0, "y": 1 },
+      { "item": "minecraft:stick", "x": 0, "y": 2 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:stone_shovel",
+    "resultCount": 1,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:cobblestone", "x": 0, "y": 0 },
+      { "item": "minecraft:stick", "x": 0, "y": 1 },
+      { "item": "minecraft:stick", "x": 0, "y": 2 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:iron_shovel",
+    "resultCount": 1,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:iron_ingot", "x": 0, "y": 0 },
+      { "item": "minecraft:stick", "x": 0, "y": 1 },
+      { "item": "minecraft:stick", "x": 0, "y": 2 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:diamond_shovel",
+    "resultCount": 1,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:diamond", "x": 0, "y": 0 },
+      { "item": "minecraft:stick", "x": 0, "y": 1 },
+      { "item": "minecraft:stick", "x": 0, "y": 2 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:wooden_hoe",
+    "resultCount": 1,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:oak_planks", "x": 0, "y": 0 },
+      { "item": "minecraft:oak_planks", "x": 1, "y": 0 },
+      { "item": "minecraft:stick", "x": 1, "y": 1 },
+      { "item": "minecraft:stick", "x": 1, "y": 2 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:stone_hoe",
+    "resultCount": 1,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:cobblestone", "x": 0, "y": 0 },
+      { "item": "minecraft:cobblestone", "x": 1, "y": 0 },
+      { "item": "minecraft:stick", "x": 1, "y": 1 },
+      { "item": "minecraft:stick", "x": 1, "y": 2 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:iron_hoe",
+    "resultCount": 1,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:iron_ingot", "x": 0, "y": 0 },
+      { "item": "minecraft:iron_ingot", "x": 1, "y": 0 },
+      { "item": "minecraft:stick", "x": 1, "y": 1 },
+      { "item": "minecraft:stick", "x": 1, "y": 2 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:diamond_hoe",
+    "resultCount": 1,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:diamond", "x": 0, "y": 0 },
+      { "item": "minecraft:diamond", "x": 1, "y": 0 },
+      { "item": "minecraft:stick", "x": 1, "y": 1 },
+      { "item": "minecraft:stick", "x": 1, "y": 2 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:wooden_sword",
+    "resultCount": 1,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:oak_planks", "x": 0, "y": 0 },
+      { "item": "minecraft:oak_planks", "x": 0, "y": 1 },
+      { "item": "minecraft:stick", "x": 0, "y": 2 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:stone_sword",
+    "resultCount": 1,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:cobblestone", "x": 0, "y": 0 },
+      { "item": "minecraft:cobblestone", "x": 0, "y": 1 },
+      { "item": "minecraft:stick", "x": 0, "y": 2 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:iron_sword",
+    "resultCount": 1,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:iron_ingot", "x": 0, "y": 0 },
+      { "item": "minecraft:iron_ingot", "x": 0, "y": 1 },
+      { "item": "minecraft:stick", "x": 0, "y": 2 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:diamond_sword",
+    "resultCount": 1,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:diamond", "x": 0, "y": 0 },
+      { "item": "minecraft:diamond", "x": 0, "y": 1 },
+      { "item": "minecraft:stick", "x": 0, "y": 2 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:copper_pickaxe",
+    "resultCount": 1,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:copper_ingot", "x": 0, "y": 0 },
+      { "item": "minecraft:copper_ingot", "x": 1, "y": 0 },
+      { "item": "minecraft:copper_ingot", "x": 2, "y": 0 },
+      { "item": "minecraft:stick", "x": 1, "y": 1 },
+      { "item": "minecraft:stick", "x": 1, "y": 2 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:copper_axe",
+    "resultCount": 1,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:copper_ingot", "x": 0, "y": 0 },
+      { "item": "minecraft:copper_ingot", "x": 1, "y": 0 },
+      { "item": "minecraft:copper_ingot", "x": 0, "y": 1 },
+      { "item": "minecraft:stick", "x": 1, "y": 1 },
+      { "item": "minecraft:stick", "x": 1, "y": 2 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:copper_shovel",
+    "resultCount": 1,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:copper_ingot", "x": 0, "y": 0 },
+      { "item": "minecraft:stick", "x": 0, "y": 1 },
+      { "item": "minecraft:stick", "x": 0, "y": 2 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:copper_hoe",
+    "resultCount": 1,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:copper_ingot", "x": 0, "y": 0 },
+      { "item": "minecraft:copper_ingot", "x": 1, "y": 0 },
+      { "item": "minecraft:stick", "x": 1, "y": 1 },
+      { "item": "minecraft:stick", "x": 1, "y": 2 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:copper_sword",
+    "resultCount": 1,
+    "shaped": true,
+    "shape": [
+      { "item": "minecraft:copper_ingot", "x": 0, "y": 0 },
+      { "item": "minecraft:copper_ingot", "x": 0, "y": 1 },
+      { "item": "minecraft:stick", "x": 0, "y": 2 }
+    ]
+  },
+  {
+    "type": "craft",
+    "result": "minecraft:bone_meal",
+    "resultCount": 3,
+    "shaped": false,
+    "ingredients": [
+      "minecraft:bone"
+    ]
+  },
+
+  {
+    "type": "mine",
+    "block": "minecraft:stone",
+    "result": "minecraft:cobblestone",
+    "resultCount": 1,
+    "requiresTool": "pickaxe",
+    "minTier": "wood"
+  },
+  {
+    "type": "mine",
+    "block": "minecraft:iron_ore",
+    "result": "minecraft:raw_iron",
+    "resultCount": 1,
+    "requiresTool": "pickaxe",
+    "minTier": "stone"
+  },
+  {
+    "type": "mine",
+    "block": "minecraft:deepslate_iron_ore",
+    "result": "minecraft:raw_iron",
+    "resultCount": 1,
+    "requiresTool": "pickaxe",
+    "minTier": "stone"
+  },
+  {
+    "type": "mine",
+    "block": "minecraft:diamond_ore",
+    "result": "minecraft:diamond",
+    "resultCount": 1,
+    "requiresTool": "pickaxe",
+    "minTier": "iron"
+  },
+  {
+    "type": "mine",
+    "block": "minecraft:deepslate_diamond_ore",
+    "result": "minecraft:diamond",
+    "resultCount": 1,
+    "requiresTool": "pickaxe",
+    "minTier": "iron"
+  },
+  {
+    "type": "mine",
+    "block": "minecraft:copper_ore",
+    "result": "minecraft:raw_copper",
+    "resultCount": 1,
+    "requiresTool": "pickaxe",
+    "minTier": "stone"
+  },
+  {
+    "type": "mine",
+    "block": "minecraft:deepslate_copper_ore",
+    "result": "minecraft:raw_copper",
+    "resultCount": 1,
+    "requiresTool": "pickaxe",
+    "minTier": "stone"
+  },
+  { "type": "mine", "block": "minecraft:cobblestone", "result": "minecraft:cobblestone", "requiresTool": "pickaxe", "minTier": "wood" },
+  { "type": "mine", "block": "minecraft:deepslate", "result": "minecraft:cobbled_deepslate", "requiresTool": "pickaxe", "minTier": "wood" },
+  { "type": "mine", "block": "minecraft:cobbled_deepslate", "result": "minecraft:cobbled_deepslate", "requiresTool": "pickaxe", "minTier": "wood" },
+  { "type": "mine", "block": "minecraft:coal_ore", "result": "minecraft:coal", "requiresTool": "pickaxe", "minTier": "wood" },
+  { "type": "mine", "block": "minecraft:deepslate_coal_ore", "result": "minecraft:coal", "requiresTool": "pickaxe", "minTier": "wood" },
+  { "type": "mine", "block": "minecraft:gold_ore", "result": "minecraft:raw_gold", "requiresTool": "pickaxe", "minTier": "iron" },
+  { "type": "mine", "block": "minecraft:deepslate_gold_ore", "result": "minecraft:raw_gold", "requiresTool": "pickaxe", "minTier": "iron" },
+  { "type": "mine", "block": "minecraft:lapis_ore", "result": "minecraft:lapis_lazuli", "requiresTool": "pickaxe", "minTier": "stone" },
+  { "type": "mine", "block": "minecraft:deepslate_lapis_ore", "result": "minecraft:lapis_lazuli", "requiresTool": "pickaxe", "minTier": "stone" },
+  { "type": "mine", "block": "minecraft:redstone_ore", "result": "minecraft:redstone", "requiresTool": "pickaxe", "minTier": "iron" },
+  { "type": "mine", "block": "minecraft:deepslate_redstone_ore", "result": "minecraft:redstone", "requiresTool": "pickaxe", "minTier": "iron" },
+  { "type": "mine", "block": "minecraft:emerald_ore", "result": "minecraft:emerald", "requiresTool": "pickaxe", "minTier": "iron" },
+  { "type": "mine", "block": "minecraft:deepslate_emerald_ore", "result": "minecraft:emerald", "requiresTool": "pickaxe", "minTier": "iron" },
+  { "type": "mine", "block": "minecraft:nether_quartz_ore", "result": "minecraft:quartz", "requiresTool": "pickaxe", "minTier": "wood" },
+  { "type": "mine", "block": "minecraft:nether_gold_ore", "result": "minecraft:gold_nugget", "requiresTool": "pickaxe", "minTier": "wood" },
+  { "type": "mine", "block": "minecraft:dirt", "result": "minecraft:dirt" },
+  { "type": "mine", "block": "minecraft:grass_block", "result": "minecraft:dirt" },
+  { "type": "mine", "block": "minecraft:clay", "result": "minecraft:clay_ball" },
+  { "type": "mine", "block": "minecraft:glowstone", "result": "minecraft:glowstone_dust" },
+
+  {
+    "type": "smelt",
+    "input": "minecraft:raw_iron",
+    "result": "minecraft:iron_ingot",
+    "resultCount": 1
+  },
+  {
+    "type": "smelt",
+    "input": "minecraft:raw_gold",
+    "result": "minecraft:gold_ingot",
+    "resultCount": 1
+  },
+  {
+    "type": "smelt",
+    "input": "minecraft:raw_copper",
+    "result": "minecraft:copper_ingot",
+    "resultCount": 1
+  },
+  {
+    "type": "smelt",
+    "input": "minecraft:cobblestone",
+    "result": "minecraft:stone",
+    "resultCount": 1
+  },
+  {
+    "type": "smelt",
+    "input": "minecraft:sand",
+    "result": "minecraft:glass",
+    "resultCount": 1
+  },
+  {
+    "type": "smelt",
+    "input": "minecraft:oak_log",
+    "result": "minecraft:charcoal",
+    "resultCount": 1
+  },
+
+  {
+    "type": "fuel",
+    "item": "minecraft:coal",
+    "smeltsPerItem": 8
+  },
+  {
+    "type": "fuel",
+    "item": "minecraft:charcoal",
+    "smeltsPerItem": 8
+  },
+  {
+    "type": "fuel",
+    "item": "minecraft:coal_block",
+    "smeltsPerItem": 80
+  }
+]
